@@ -9,12 +9,15 @@ The project currently provides:
 
 * a sparse, big-endian physical memory bus;
 * ROM and RAM regions with bounds and write-protection checks;
-* an initial MC68040 register/reset abstraction;
+* an initial MC68040 interpreter with reset, branches, subroutines, selected
+  data movement/arithmetic instructions, and explicit bus/illegal-opcode stops;
 * a NeXTcube machine composition and AppKit ROM loader;
 * a native application window shared by Cocoa and GNUstep; and
 * core tests runnable without a ROM image.
 
-It does **not** yet execute 68040 instructions or boot a NeXT ROM.
+It executes a deliberately small, tested subset of 68040 instructions. It does
+**not** yet implement the complete CPU, NeXT chipset and peripherals required to
+boot a NeXT ROM.
 
 ## Build on macOS
 

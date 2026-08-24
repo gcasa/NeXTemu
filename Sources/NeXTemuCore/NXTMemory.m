@@ -114,26 +114,26 @@
 
 - (NXTMemoryResult)readWord:(NXTUInt16 *)value atAddress:(NXTUInt32)address
 {
-    NXTUInt8 bytes[2];
-    NXTMemoryResult result;
-    result = [self readByte:&bytes[0] atAddress:address];
-    if (result != NXTMemoryResultOK) return result;
-    result = [self readByte:&bytes[1] atAddress:address + 1];
-    if (result != NXTMemoryResultOK) return result;
+    NXTMemoryRegion *region;
+    NXTUInt8 *bytes;
+    if (value == NULL) return NXTMemoryResultOutOfRange;
+    region = [self regionContainingAddress:address length:2];
+    if (region == nil) return NXTMemoryResultUnmapped;
+    bytes = [region mutableBytes] + address - [region baseAddress];
     *value = (NXTUInt16)(((NXTUInt16)bytes[0] << 8) | bytes[1]);
     return NXTMemoryResultOK;
 }
 
 - (NXTMemoryResult)readLong:(NXTUInt32 *)value atAddress:(NXTUInt32)address
 {
-    NXTUInt16 high;
-    NXTUInt16 low;
-    NXTMemoryResult result;
-    result = [self readWord:&high atAddress:address];
-    if (result != NXTMemoryResultOK) return result;
-    result = [self readWord:&low atAddress:address + 2];
-    if (result != NXTMemoryResultOK) return result;
-    *value = ((NXTUInt32)high << 16) | low;
+    NXTMemoryRegion *region;
+    NXTUInt8 *bytes;
+    if (value == NULL) return NXTMemoryResultOutOfRange;
+    region = [self regionContainingAddress:address length:4];
+    if (region == nil) return NXTMemoryResultUnmapped;
+    bytes = [region mutableBytes] + address - [region baseAddress];
+    *value = ((NXTUInt32)bytes[0] << 24) | ((NXTUInt32)bytes[1] << 16) |
+             ((NXTUInt32)bytes[2] << 8) | bytes[3];
     return NXTMemoryResultOK;
 }
 

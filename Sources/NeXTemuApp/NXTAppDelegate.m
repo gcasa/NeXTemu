@@ -186,6 +186,8 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
 - (void)resetMachine:(id)sender
 {
     NSString *registers;
+    NSString *status;
+    NXTProcessorResult result;
     (void)sender;
     if (_machine == nil) {
         NSBeep();
@@ -196,7 +198,19 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         [_statusField setStringValue:@"Reset failed: ROM vectors could not be read"];
         return;
     }
-    [_statusField setStringValue:@"ROM loaded; processor reset complete (execution core pending)"];
+    result = [_machine runForInstructionCount:100000];
+    if (result == NXTProcessorResultStopped) {
+        status = @"Processor stopped normally";
+    } else if (result == NXTProcessorResultInstructionLimit) {
+        status = @"Running paused after 100,000 instructions";
+    } else if (result == NXTProcessorResultBusError) {
+        status = @"Processor halted on an unmapped memory access";
+    } else {
+        status = [NSString stringWithFormat:@"Unsupported opcode %04x at %08x",
+            (unsigned int)[[_machine processor] lastOpcode],
+            (unsigned int)[[_machine processor] lastOpcodeAddress]];
+    }
+    [_statusField setStringValue:status];
     registers = [NSString stringWithFormat:@"SSP: %08x    PC: %08x",
         (unsigned int)[[_machine processor] addressRegister:7],
         (unsigned int)[[_machine processor] programCounter]];

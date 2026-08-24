@@ -21,6 +21,7 @@ typedef enum {
 - (id)initWithModel:(NXTMachineModel)model ramSize:(NXTUInt32)ramSize;
 - (BOOL)loadROMAtPath:(NSString *)path error:(NSString **)errorMessage;
 - (BOOL)reset;
+- (NXTProcessorResult)runForInstructionCount:(NXTUInt32)count;
 - (NXTMachineModel)model;
 - (unsigned int)clockSpeedMHz;
 - (NXTMemory *)memory;

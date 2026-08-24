@@ -63,6 +63,10 @@
 }
 
 - (BOOL)reset { return [_processor reset]; }
+- (NXTProcessorResult)runForInstructionCount:(NXTUInt32)count
+{
+    return [_processor runForInstructionCount:count];
+}
 - (NXTMachineModel)model { return _model; }
 - (unsigned int)clockSpeedMHz
 {
