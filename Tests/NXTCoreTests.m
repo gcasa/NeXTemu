@@ -237,6 +237,8 @@ static void NXTTestFMoveLong(void)
     NXTUInt8 code[] = {
         0x26, 0x3c, 0x00, 0x00, 0x80, 0x00, /* MOVE.L #$8000,D3 */
         0xf2, 0x03, 0x40, 0x80,             /* FMOVE.L D3,FP1 */
+        0xf2, 0x27, 0x60, 0x80,             /* FMOVE.L FP1,-(A7) */
+        0xf2, 0x1f, 0x40, 0x80,             /* FMOVE.L (A7)+,FP1 */
         0xf2, 0x04, 0x60, 0x80,             /* FMOVE.L FP1,D4 */
         0x4e, 0x72, 0x27, 0x00
     };
@@ -255,6 +257,79 @@ static void NXTTestFMoveLong(void)
     [processor release]; [stack release]; [image release]; [memory release];
 }
 
+static void NXTTestSCCLocalLoopback(void)
+{
+    NXTMemory *memory = [[NXTMemory alloc] init];
+    NXTUInt8 status, value;
+    [memory resetNeXTDevicesForTurbo:YES];
+
+    [memory writeByte:0x0e atAddress:0x02018001U];
+    [memory writeByte:0x10 atAddress:0x02018001U];
+    [memory writeByte:0x5a atAddress:0x02018003U];
+    [memory readByte:&status atAddress:0x02018001U];
+    NXTAssert((status & 1U) != 0, "SCC reports received data in local loopback");
+    [memory readByte:&value atAddress:0x02018003U];
+    NXTAssert(value == 0x5a, "SCC locally loops transmitted data");
+
+    [memory writeByte:0x0e atAddress:0x02018001U];
+    [memory writeByte:0x00 atAddress:0x02018001U];
+    [memory writeByte:0x69 atAddress:0x02018003U];
+    [memory readByte:&status atAddress:0x02018001U];
+    NXTAssert((status & 1U) == 0, "SCC stops echoing after local loopback is disabled");
+    [memory release];
+}
+
+static void NXTTestGenericDMAControlStatus(void)
+{
+    NXTMemory *memory = [[NXTMemory alloc] init];
+    NXTUInt32 value = 0;
+    [memory resetNeXTDevicesForTurbo:YES];
+    [memory writeLong:0x00030000U atAddress:0x02000150U];
+    [memory readLong:&value atAddress:0x02000150U];
+    NXTAssert(value == 0x03000000U,
+              "generic DMA CSR exposes enabled/update state in the high byte");
+    [memory writeLong:0x00100000U atAddress:0x02000150U];
+    [memory readLong:&value atAddress:0x02000150U];
+    NXTAssert(value == 0, "generic DMA reset clears its state");
+    [memory release];
+}
+
+static void NXTTestCompareMemoryPostincrement(void)
+{
+    NXTMemory *memory;
+    NXTMemoryRegion *image, *ram;
+    NXTMC68040 *processor;
+    NXTUInt8 vectors[8] = { 0,0,0x20,0, 0,0,1,0 };
+    NXTUInt8 code[] = {
+        0x20,0x7c,0,0,0x10,0x00,       /* MOVEA.L #$1000,A0 */
+        0x22,0x7c,0,0,0x10,0x10,       /* MOVEA.L #$1010,A1 */
+        0xb3,0x88,                     /* CMPM.L (A0)+,(A1)+ */
+        0x4e,0x72,0x27,0x00
+    };
+    NXTUInt8 equalWords[20] = { 0x12,0x34,0x56,0x78, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+                               0x12,0x34,0x56,0x78 };
+    memory = [[NXTMemory alloc] init];
+    image = [[NXTMemoryRegion alloc] initWithBaseAddress:0 length:0x200 readOnly:YES];
+    ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000 length:0x100 readOnly:NO];
+    [memory addRegion:image]; [memory addRegion:ram];
+    [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+    [memory loadData:[NSData dataWithBytes:code length:sizeof(code)] atAddress:0x100];
+    [memory loadData:[NSData dataWithBytes:equalWords length:sizeof(equalWords)] atAddress:0x1000];
+    processor = [[NXTMC68040 alloc] initWithMemory:memory];
+    NXTAssert([processor reset], "resets CMPM test");
+    NXTAssert([processor step] == NXTProcessorResultOK &&
+              [processor step] == NXTProcessorResultOK &&
+              [processor step] == NXTProcessorResultOK,
+              "executes CMPM.L");
+    NXTAssert(([processor statusRegister] & 4U) != 0,
+              "CMPM reports equal memory operands");
+    NXTAssert([processor addressRegister:0] == 0x1004 &&
+              [processor addressRegister:1] == 0x1014,
+              "CMPM postincrements both address registers");
+    NXTAssert([processor step] == NXTProcessorResultStopped, "stops CMPM test");
+    [processor release]; [ram release]; [image release]; [memory release];
+}
+
 int main(void)
 {
     NSAutoreleasePool *pool;
@@ -267,6 +342,9 @@ int main(void)
     NXTTestExtendedBranches();
     NXTTestImmediateCompareCarry();
     NXTTestFMoveLong();
+    NXTTestSCCLocalLoopback();
+    NXTTestGenericDMAControlStatus();
+    NXTTestCompareMemoryPostincrement();
     if (failures == 0) printf("All core tests passed.\n");
     [pool drain];
     return failures == 0 ? 0 : 1;

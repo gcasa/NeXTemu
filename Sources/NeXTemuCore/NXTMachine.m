@@ -54,6 +54,7 @@ static BOOL NXTAddRegisterBank(NXTMemory *memory, NXTUInt32 base, NXTUInt32 leng
             !NXTAddRegisterBank(_memory, 0x02112000U, 0x00000010U) ||
             !NXTAddRegisterBank(_memory, 0x02114000U, 0x00000020U) || /* SCSI */
             !NXTAddRegisterBank(_memory, 0x02114108U, 0x00000004U) ||
+            !NXTAddRegisterBank(_memory, 0x02116000U, 0x00000008U) || /* timer */
             !NXTAddRegisterBank(_memory, 0x02118000U, 0x00000014U) || /* serial */
             !NXTAddRegisterBank(_memory, 0x0211a000U, 0x00000004U) || /* timer */
             !NXTAddRegisterBank(_memory, 0x02200000U, 0x00010000U) || /* TMC */

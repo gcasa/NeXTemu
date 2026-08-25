@@ -420,7 +420,8 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     /* The ROM's FPU POST treats the 80-bit registers as opaque 12-byte
        extended values while checking FMOVEM preservation. */
     if ((opcode == 0xf21f || opcode == 0xf227) &&
-        _lastOpcodeAddress < 0x01005dc0U) {
+        [_memory readWord:&extension atAddress:_programCounter] == NXTMemoryResultOK &&
+        (extension == 0xd0ffU || extension == 0xe0ffU)) {
         unsigned int fpIndex;
         NXTUInt32 fpAddress;
         if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
@@ -451,8 +452,7 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         return NXTProcessorResultOK;
     }
     if (opcode == 0xf203 || opcode == 0xf204 ||
-        ((opcode == 0xf21f || opcode == 0xf227) &&
-         _lastOpcodeAddress >= 0x01005de0U && _lastOpcodeAddress < 0x01005e10U)) {
+        opcode == 0xf21f || opcode == 0xf227) {
         union { float f; NXTUInt32 u; } singleValue;
         union { double d; NXTUInt64 u; } doubleValue;
         unsigned int fpRegister;
@@ -570,7 +570,11 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
             if (_fpValues[fpDestination] >= 0.0) {
                 double guess = _fpValues[fpDestination] > 1.0 ? _fpValues[fpDestination] : 1.0;
                 unsigned int iteration;
-                for (iteration=0; iteration<12; iteration++)
+                /* The ROM compares the result exactly after squaring an
+                   integer near 32768.  Twelve iterations from x itself do
+                   not converge for values around 1e9; 32 reaches the
+                   correctly rounded double result across the POST range. */
+                for (iteration=0; iteration<32; iteration++)
                     guess = 0.5 * (guess + _fpValues[fpDestination] / guess);
                 _fpValues[fpDestination] = guess;
             }
@@ -974,6 +978,23 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         if (![self readEA:&value mode:sourceMode register:sourceRegister size:size])
             return [self fail:NXTProcessorResultBusError];
         [self setNZForValue:value size:size];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf138) == 0xb108 && ((opcode >> 6) & 3) != 3) { /* CMPM */
+        unsigned int sourceAddressRegister = opcode & 7;
+        unsigned int destinationAddressRegister = (opcode >> 9) & 7;
+        unsigned int sourceIncrement;
+        unsigned int destinationIncrement;
+        size = 1U << ((opcode >> 6) & 3);
+        sourceIncrement = size == 1 && sourceAddressRegister == 7 ? 2 : size;
+        destinationIncrement = size == 1 && destinationAddressRegister == 7 ? 2 : size;
+        if (![self readSized:&sourceValue address:_addressRegisters[sourceAddressRegister] size:size] ||
+            ![self readSized:&immediateValue address:_addressRegisters[destinationAddressRegister] size:size])
+            return [self fail:NXTProcessorResultBusError];
+        _addressRegisters[sourceAddressRegister] += sourceIncrement;
+        _addressRegisters[destinationAddressRegister] += destinationIncrement;
+        value = immediateValue - sourceValue;
+        [self setSubFlagsWithDestination:immediateValue source:sourceValue result:value size:size];
         return NXTProcessorResultOK;
     }
     if (((opcode & 0xff00) == 0x4400 || (opcode & 0xff00) == 0x4600) &&

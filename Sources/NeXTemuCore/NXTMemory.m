@@ -1,6 +1,6 @@
 #import "NXTMemory.h"
 #include <string.h>
-#ifdef NXT_TRACE_RTC
+#if defined(NXT_TRACE_RTC) || defined(NXT_TRACE_SCC) || defined(NXT_TRACE_DMA)
 #include <stdio.h>
 #endif
 
@@ -16,6 +16,19 @@ static NXTUInt32 NXTCanonicalIOAddress(NXTUInt32 address)
     address &= 0x7fffffffU;
     if ((address & 0xfff00000U) == 0x02100000U) address -= 0x00100000U;
     return address;
+}
+
+static int NXTDMAChannelForAddress(NXTUInt32 address)
+{
+    static const NXTUInt16 offsets[12] = {
+        0x010, 0x040, 0x050, 0x080, 0x090, 0x0c0,
+        0x0d0, 0x110, 0x150, 0x180, 0x1c0, 0x1d0
+    };
+    unsigned int index;
+    if (address < 0x02000000U || address >= 0x02000200U) return -1;
+    for (index = 0; index < 12; index++)
+        if (address - 0x02000000U == offsets[index]) return (int)index;
+    return -1;
 }
 
 #ifdef NXT_TRACE_MMIO
@@ -94,6 +107,12 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     memset(_espRegisters, 0, sizeof(_espRegisters));
     memset(_espFIFO, 0, sizeof(_espFIFO));
     memset(_dmaRegisters, 0, sizeof(_dmaRegisters));
+    memset(_dmaCSR, 0, sizeof(_dmaCSR));
+    memset(_enetRegisters, 0, sizeof(_enetRegisters));
+    _enetRegisters[6] = 0x80;
+    _enetRegisters[8] = 0x00; _enetRegisters[9] = 0x00;
+    _enetRegisters[10] = 0x0f; _enetRegisters[11] = 0x12;
+    _enetRegisters[12] = 0x34; _enetRegisters[13] = 0x56;
     _espRegisters[9] = 2;
     _espFIFOCount = 0;
     _espInterrupt = 0;
@@ -272,6 +291,7 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     _rtcRegisters[19] = 'd';
     _rtcRegisters[30] = 0;
     _rtcRegisters[31] = 0;
+    _rtcSeconds = 1704067200U;
     sum = 0;
     for (index = 0; index < 32; index += 2)
         sum += ((NXTUInt16)_rtcRegisters[index] << 8) | _rtcRegisters[index + 1];
@@ -287,7 +307,10 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     memset(_bmapRegisters, 0, sizeof(_bmapRegisters));
     _bmapRegisters[13] = 0x20000000U;
     memset(_adbRegisters, 0, sizeof(_adbRegisters));
-    _sccRegisterPointer = 0;
+    memset(_sccRegisterPointer, 0, sizeof(_sccRegisterPointer));
+    memset(_sccRegisters, 0, sizeof(_sccRegisters));
+    memset(_sccReceiveData, 0, sizeof(_sccReceiveData));
+    memset(_sccReceiveAvailable, 0, sizeof(_sccReceiveAvailable));
     _interruptStatus = 0;
     _interruptMask = 0;
     [self resetSCSI];
@@ -297,8 +320,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
 {
     NXTUInt32 seconds;
     address &= 0x3f;
-    if (address == 0x20) {
-        seconds = 1704067200U; /* 2024-01-01 UTC */
+    if (address >= 0x20 && address <= 0x23) {
+        seconds = _rtcSeconds++; /* Advance while the ROM polls the clock. */
         _rtcRegisters[0x20] = (NXTUInt8)(seconds >> 24);
         _rtcRegisters[0x21] = (NXTUInt8)(seconds >> 16);
         _rtcRegisters[0x22] = (NXTUInt8)(seconds >> 8);
@@ -450,6 +473,9 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
             *value = _espInterrupt; _espInterrupt = 0;
         } else if (reg == 7) *value = (NXTUInt8)_espFIFOCount;
         else *value = _espRegisters[reg];
+#ifdef NXT_TRACE_SCSI
+        fprintf(stderr, "ESP R%u=%02x\n", reg, *value);
+#endif
         return NXTMemoryResultOK;
     }
     if (canonical == NXT_ESP_BASE + 0x20U) { *value = _espRegisters[12]; return NXTMemoryResultOK; }
@@ -458,19 +484,29 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         region = [self regionContainingAddress:canonical length:1];
         *value = canonical == 0x0200e002U ? 0x02U :
             (region == nil ? 0 : [region mutableBytes][canonical - [region baseAddress]]);
-        if (canonical >= 0x0200e008U) _interruptStatus &= ~0x10U;
         return NXTMemoryResultOK;
     }
     if (canonical >= 0x02018000U && canonical < 0x02018004U) {
         switch (canonical - 0x02018000U) {
-        case 0: *value = 0x04; break; /* channel B: transmitter empty */
+        case 0: *value = (NXTUInt8)(0x04U | (_sccReceiveAvailable[1] ? 1U : 0U)); break;
         case 1:
-            *value = _sccRegisterPointer == 1 ? 0x07 :
-                (_sccRegisterPointer == 0 ? 0x2c : 0);
-            _sccRegisterPointer = 0;
+            *value = _sccRegisterPointer[0] == 1 ? 0x07 :
+                (_sccRegisterPointer[0] == 0 ?
+                    (NXTUInt8)(0x2cU | (_sccReceiveAvailable[0] ? 1U : 0U)) : 0);
+            _sccRegisterPointer[0] = 0;
             break;
-        default: *value = 0; break;
+        case 2: *value = _sccReceiveData[1]; _sccReceiveAvailable[1] = NO; break;
+        default: *value = _sccReceiveData[0]; _sccReceiveAvailable[0] = NO; break;
         }
+        return NXTMemoryResultOK;
+    }
+    if (canonical >= 0x02006000U && canonical < 0x02006010U) {
+        unsigned int reg = canonical - 0x02006000U;
+        *value = _enetRegisters[reg];
+        if (reg == 0 && (_enetRegisters[6] & 0x80U) == 0) *value |= 0x80U;
+        else if (reg == 1) *value &= 0xafU;
+        else if (reg == 3) *value &= 0x9fU;
+        else if (reg == 6) *value |= 0x40U;
         return NXTMemoryResultOK;
     }
     if (canonical >= 0x02008000U && canonical < 0x02008008U) {
@@ -481,16 +517,21 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         return NXTMemoryResultOK;
     }
     if (canonical >= 0x0201a000U && canonical <= 0x0201a003U) {
-        if ((canonical & 3) == 0 || (canonical & 3) == 2) {
-            _eventCounter += 1024;
-            _eventLatch = _eventCounter;
+        if ((canonical & 3) == 0) {
+            /* Advance in small quanta; ROM delay calibration performs
+               several counter reads per millisecond interval. */
+            _eventCounter += 200;
+            _eventLatch = (_eventCounter / 30U) * 5U;
         }
         *value = (NXTUInt8)(_eventLatch >> ((3 - (canonical & 3)) * 8));
         return NXTMemoryResultOK;
     }
     if (canonical == 0x02016000U || canonical == 0x02016001U) {
-        _eventCounter += 1024;
         *value = (NXTUInt8)(_eventCounter >> (canonical == 0x02016000U ? 8 : 0));
+        return NXTMemoryResultOK;
+    }
+    if (canonical == 0x02016004U) {
+        *value = 0;
         return NXTMemoryResultOK;
     }
     region = [self regionContainingAddress:address length:1];
@@ -509,6 +550,15 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         *value = (address & 2) != 0 ? 0x9f0fU : 0;
         return NXTMemoryResultOK;
     }
+    if (NXTCanonicalIOAddress(address) == 0x02016000U) {
+        *value = (NXTUInt16)_eventCounter;
+        return NXTMemoryResultOK;
+    }
+    if (NXTCanonicalIOAddress(address) == 0x0201a000U) {
+        _eventCounter += 1024U;
+        *value = (NXTUInt16)_eventCounter;
+        return NXTMemoryResultOK;
+    }
     region = [self regionContainingAddress:address length:2];
     if (region == nil) return NXTMemoryResultUnmapped;
     bytes = [region mutableBytes] + address - [region baseAddress];
@@ -524,7 +574,9 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     NXTTraceMMIO(address, NO, 4);
     {
         NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+        int dmaChannel = NXTDMAChannelForAddress(canonical);
         if (canonical == NXT_DMA_CSR) { *value = ((NXTUInt32)_dmaState << 24) | 0x40U; return NXTMemoryResultOK; }
+        if (dmaChannel > 0) { *value = (NXTUInt32)_dmaCSR[dmaChannel] << 24; return NXTMemoryResultOK; }
         if (canonical == 0x02007000U) { *value = _interruptStatus; return NXTMemoryResultOK; }
         if (canonical == 0x02007800U) { *value = _interruptMask; return NXTMemoryResultOK; }
         if (canonical >= 0x020c0000U && canonical < 0x020c0040U) {
@@ -570,6 +622,9 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     NXTUInt32 canonical = NXTCanonicalIOAddress(address);
     if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U) {
         unsigned int reg = canonical - NXT_ESP_BASE;
+#ifdef NXT_TRACE_SCSI
+        fprintf(stderr, "ESP W%u=%02x\n", reg, value);
+#endif
         if (reg == 2) {
             if (_espFIFOCount < sizeof(_espFIFO)) _espFIFO[_espFIFOCount++] = value;
         } else if (reg == 3) {
@@ -593,17 +648,53 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     if (canonical >= 0x0200e000U && canonical < 0x0200e010U) {
         region = [self regionContainingAddress:canonical length:1];
         if (region != nil) [region mutableBytes][canonical - [region baseAddress]] = value;
-        if (canonical >= 0x0200e004U && canonical < 0x0200e008U)
-            _interruptStatus |= 0x10U;
         return NXTMemoryResultOK;
     }
     if (canonical >= 0x02018000U && canonical < 0x02018004U) {
-        if (canonical - 0x02018000U == 1) {
-            if (_sccRegisterPointer == 0)
-                _sccRegisterPointer = (NXTUInt8)((value & 7U) |
+        NXTUInt32 sccOffset = canonical - 0x02018000U;
+#ifdef NXT_TRACE_SCC
+        fprintf(stderr, "SCC W%u=%02x pA=%u pB=%u wr14A=%02x wr14B=%02x\n",
+                (unsigned)sccOffset, value, _sccRegisterPointer[0],
+                _sccRegisterPointer[1], _sccRegisters[0][14], _sccRegisters[1][14]);
+#endif
+        if (sccOffset == 0 || sccOffset == 1) {
+            unsigned int channel = sccOffset == 1 ? 0 : 1;
+            if (_sccRegisterPointer[channel] == 0)
+                _sccRegisterPointer[channel] = (NXTUInt8)((value & 7U) |
                     (((value & 0x38U) == 0x08U) ? 8U : 0U));
-            else _sccRegisterPointer = 0;
+            else {
+                _sccRegisters[channel][_sccRegisterPointer[channel]] = value;
+                _sccRegisterPointer[channel] = 0;
+            }
+        } else if (sccOffset == 3) {
+            if ((_sccRegisters[0][14] & 0x10U) != 0) {
+                _sccReceiveData[0] = value; _sccReceiveAvailable[0] = YES;
+            }
+        } else if (sccOffset == 2) {
+            if ((_sccRegisters[1][14] & 0x10U) != 0) {
+                _sccReceiveData[1] = value; _sccReceiveAvailable[1] = YES;
+            }
         }
+        return NXTMemoryResultOK;
+    }
+    if (canonical == 0x02016000U) {
+        _eventCounter = (_eventCounter & 0xffff00ffU) | ((NXTUInt32)value << 8);
+        return NXTMemoryResultOK;
+    }
+    if (canonical == 0x02016001U) {
+        _eventCounter = (_eventCounter & 0xffffff00U) | value;
+        return NXTMemoryResultOK;
+    }
+    if (canonical == 0x02016004U) return NXTMemoryResultOK;
+    if (canonical >= 0x02006000U && canonical < 0x02006010U) {
+        unsigned int reg = canonical - 0x02006000U;
+        if (reg == 0) _enetRegisters[0] &= (NXTUInt8)~value;
+        else if (reg == 2) _enetRegisters[2] &= (NXTUInt8)~(value & 0x8fU);
+        else if (reg == 6) {
+            _enetRegisters[6] = value & 0x80U;
+            if (value & 0x80U) { _enetRegisters[0] = 0; _enetRegisters[2] = 0; }
+            else _enetRegisters[0] = 0x80U;
+        } else _enetRegisters[reg] = value;
         return NXTMemoryResultOK;
     }
     region = [self regionContainingAddress:address length:1];
@@ -634,11 +725,79 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     NXTUInt8 *bytes;
     {
         NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+#ifdef NXT_TRACE_DMA
+        if (canonical >= 0x02004000U && canonical < 0x02004400U)
+            fprintf(stderr, "DMAREG W %08x=%08x\n", canonical, value);
+#endif
+        int dmaChannel = NXTDMAChannelForAddress(canonical);
         if (canonical == NXT_DMA_CSR) {
             if (value & 0x00100000U) _dmaState &= ~(0x0bU);
             if (value & 0x00010000U) _dmaState |= 1U;
             if (value & 0x00020000U) _dmaState |= 2U;
             if (value & 0x00080000U) _dmaState &= ~8U;
+            return NXTMemoryResultOK;
+        }
+        if (dmaChannel > 0) {
+#ifdef NXT_TRACE_DMA
+            fprintf(stderr, "DMACSR W ch%d=%08x\n", dmaChannel, value);
+#endif
+            if (value & 0x00100000U) _dmaCSR[dmaChannel] &= ~(0x0bU);
+            if (value & 0x00010000U) _dmaCSR[dmaChannel] |= 1U;
+            if (value & 0x00020000U) _dmaCSR[dmaChannel] |= 2U;
+            if (value & 0x00080000U) _dmaCSR[dmaChannel] &= ~8U;
+            if (dmaChannel == 7 && (value & 0x00010000U) != 0) {
+                NXTUInt32 source = 0, sourceLimit = 0, destination = 0, destinationLimit = 0;
+                NXTUInt32 count, index;
+                NXTUInt8 byteValue;
+                BOOL accepted = YES, broadcast = YES;
+                [self readLong:&source atAddress:0x02004118U];
+                [self readLong:&sourceLimit atAddress:0x02004114U];
+                [self readLong:&destination atAddress:0x02004150U];
+                [self readLong:&destinationLimit atAddress:0x02004154U];
+                count = sourceLimit > source ? sourceLimit - source : 0;
+                for (index = 0; index < 6; index++) {
+                    if ([self readByte:&byteValue atAddress:source + index] != NXTMemoryResultOK) {
+                        accepted = NO; broadcast = NO; break;
+                    }
+                    if (byteValue != _enetRegisters[8 + index]) accepted = NO;
+                    if (byteValue != 0xffU) broadcast = NO;
+                }
+                accepted = accepted || broadcast;
+                if (count > destinationLimit - destination)
+                    count = destinationLimit - destination;
+                for (index = 0; accepted && index < count; index++) {
+                    if ([self readByte:&byteValue atAddress:source + index] != NXTMemoryResultOK ||
+                        [self writeByte:byteValue atAddress:destination + index] != NXTMemoryResultOK)
+                        break;
+                }
+                /* The receive DMA completion normally advances the active
+                   descriptor before raising its interrupt.  The ROM polls
+                   that descriptor during POST, so complete it synchronously
+                   for the internal Ethernet loopback packet. */
+                for (index = 0x0bff0000U; accepted && index < 0x0c000000U; index += 2U) {
+                    NXTUInt32 descriptorStart;
+                    if ([self readLong:&descriptorStart atAddress:index] == NXTMemoryResultOK &&
+                        descriptorStart == destination) {
+                        [self writeByte:1 atAddress:index + 8U];
+                        [self writeLong:destination + count + 1U atAddress:index + 10U];
+                        break;
+                    }
+                }
+                if (accepted) {
+                    NXTUInt32 nextDestination = 0, nextDestinationLimit = 0;
+                    [self readLong:&nextDestination atAddress:0x02004158U];
+                    [self readLong:&nextDestinationLimit atAddress:0x0200415cU];
+                    if (nextDestination != 0 && nextDestinationLimit > nextDestination) {
+                        [self writeLong:nextDestination atAddress:0x02004150U];
+                        [self writeLong:nextDestinationLimit atAddress:0x02004154U];
+                    }
+                }
+                _dmaCSR[7] |= 8U;
+                if (accepted) {
+                    _dmaCSR[8] |= 8U;
+                    _enetRegisters[2] |= 0x80U;
+                }
+            }
             return NXTMemoryResultOK;
         }
         if (canonical == 0x02007800U) { _interruptMask = value; return NXTMemoryResultOK; }

@@ -279,8 +279,10 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     romsPath = [[NSBundle mainBundle] pathForResource:@"roms" ofType:nil];
     files = romsPath == nil ? nil : [[NSFileManager defaultManager]
         contentsOfDirectoryAtPath:romsPath error:NULL];
-    for (index = 0; index < [files count]; index++) {
-        candidate = [romsPath stringByAppendingPathComponent:[files objectAtIndex:index]];
+    files = [files sortedArrayUsingSelector:@selector(compare:)];
+    /* Prefer the newest bundled revision instead of filesystem order. */
+    for (index = [files count]; index > 0; index--) {
+        candidate = [romsPath stringByAppendingPathComponent:[files objectAtIndex:index - 1]];
         if ([self loadROMAtPath:candidate showErrors:NO]) break;
     }
 }

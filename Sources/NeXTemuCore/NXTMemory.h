@@ -30,6 +30,7 @@
     NXTUInt32 _eventLatch;
     NXTUInt32 _scr2Value;
     NXTUInt8 _rtcRegisters[64];
+    NXTUInt32 _rtcSeconds;
     NXTUInt8 _rtcShiftIn;
     NXTUInt8 _rtcShiftOut;
     NXTUInt8 _rtcAddress;
@@ -50,9 +51,14 @@
     NSUInteger _scsiDataOffset;
     NXTUInt32 _dmaRegisters[9];
     NXTUInt8 _dmaState;
+    NXTUInt8 _dmaCSR[12];
+    NXTUInt8 _enetRegisters[16];
     NXTUInt32 _bmapRegisters[16];
     NXTUInt32 _adbRegisters[35];
-    NXTUInt8 _sccRegisterPointer;
+    NXTUInt8 _sccRegisterPointer[2];
+    NXTUInt8 _sccRegisters[2][16];
+    NXTUInt8 _sccReceiveData[2];
+    BOOL _sccReceiveAvailable[2];
     NXTUInt32 _interruptStatus;
     NXTUInt32 _interruptMask;
 }
