@@ -44,9 +44,10 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 ifeq ($(UNAME_S),Darwin)
-$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FILES) | $(BUILD_DIR)
+$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist Resources/NeXTemu.icns $(ROM_FILES) | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/NeXTemu.app/Contents/MacOS $(BUILD_DIR)/NeXTemu.app/Contents/Resources
 	cp Resources/Info.plist $(BUILD_DIR)/NeXTemu.app/Contents/Info.plist
+	cp Resources/NeXTemu.icns $(BUILD_DIR)/NeXTemu.app/Contents/Resources/NeXTemu.icns
 	@if [ -d "$(ROMS_DIR)" ]; then \
 		rm -rf $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \
 		cp -R $(ROMS_DIR) $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \

@@ -1,6 +1,6 @@
 #import "NXTMemory.h"
 #include <string.h>
-#if defined(NXT_TRACE_RTC) || defined(NXT_TRACE_SCC) || defined(NXT_TRACE_DMA)
+#if defined(NXT_TRACE_RTC) || defined(NXT_TRACE_SCC) || defined(NXT_TRACE_DMA) || defined(NXT_TRACE_SCSI)
 #include <stdio.h>
 #endif
 
@@ -174,6 +174,11 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     if (count > sizeof(cdb)) count = sizeof(cdb);
     if (count != 0) memcpy(cdb, _espFIFO + start, count);
     _espFIFOCount = 0;
+#ifdef NXT_TRACE_SCSI
+    fprintf(stderr, "SCSI CDB %02x count=%u id=%u bytes=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+            cdb[0], count, _espRegisters[4] & 7U, cdb[0], cdb[1], cdb[2], cdb[3],
+            cdb[4], cdb[5], cdb[6], cdb[7], cdb[8], cdb[9]);
+#endif
     /* The monitor's default `sd(0,0,0)` boot selects SCSI target 0.  Register
        4 is the destination ID when written (and the status register when
        read), so do not confuse it with the controller's own ID. */
@@ -278,8 +283,18 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         _scsiPhase = 3;
     } else amount = 0;
     _dmaRegisters[4] = address + amount;
+#ifdef NXT_TRACE_SCSI
+    fprintf(stderr, "SCSI DMA phase=%u address=%08x limit=%08x requested=%u amount=%u available=%u\n",
+            _scsiPhase, address, limit, requested, amount, available);
+#endif
     requested = (requested == 0 ? 65536U : requested) - amount;
     _espRegisters[0] = (NXTUInt8)requested; _espRegisters[1] = (NXTUInt8)(requested >> 8);
+    /* The initiator's transfer count, rather than the size of the target's
+       backing response, terminates this data phase.  Leaving unread response
+       padding active makes the following status transfer consume disk bytes
+       and causes the ROM to retry every READ indefinitely. */
+    if (requested == 0 && (_scsiPhase == 0 || _scsiPhase == 1))
+        _scsiPhase = 3;
     _dmaState = 0x08;
     _espInterrupt = 0x08;
     _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK | NXT_INTR_SCSI_DMA;
@@ -356,9 +371,11 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
 {
     NXTUInt32 pending = _interruptStatus & _interruptMask;
     unsigned int hardclockInterval = (unsigned int)_hardclockReload * 8U;
+    if (_kernelEventCounterMode)
+        _eventCounter = (_eventCounter + 1U) & 0x000fffffU;
     if (hardclockInterval < 5000U) hardclockInterval = 5000U;
     if ((_hardclockCSR & 0x80U) != 0 && _hardclockReload != 0 &&
-        (_interruptMask & 0x0000000fU) != 0 &&
+        (_interruptMask & NXT_INTR_TIMER) != 0 &&
         ++_hardclockTicks >= hardclockInterval) {
         _hardclockTicks = 0;
         _interruptStatus |= NXT_INTR_TIMER;
@@ -586,9 +603,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     if (canonical >= 0x0201a000U && canonical <= 0x0201a003U) {
         if ((canonical & 3) == 0) {
             if (_kernelEventCounterMode) {
-                /* The kernel consumes the native 20-bit counter and compares
-                   a complete sample against a 1000-iteration baseline. */
-                _eventCounter = (_eventCounter + 2048U) & 0x000fffffU;
+                /* Kernel reads passively latch the free-running counter,
+                   which advances with guest execution in the device tick. */
                 _eventLatch = _eventCounter;
             } else {
                 /* ROM POST uses the slower board-test calibration scale. */
@@ -604,7 +620,7 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         return NXTMemoryResultOK;
     }
     if (canonical == 0x02016004U) {
-        *value = (_interruptMask & 0x0000000fU) != 0 ? _hardclockCSR : 0;
+        *value = (_interruptMask & NXT_INTR_TIMER) != 0 ? _hardclockCSR : 0;
         _interruptStatus &= ~NXT_INTR_TIMER;
         return NXTMemoryResultOK;
     }

@@ -8,6 +8,8 @@
     <string>NeXTemu</string>
     <key>CFBundleIdentifier</key>
     <string>org.nextemu.NeXTemu</string>
+    <key>CFBundleIconFile</key>
+    <string>NeXTemu.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
