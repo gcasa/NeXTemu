@@ -15,10 +15,13 @@
     NSTextField *_diskField;
     NSTextField *_statusField;
     NSTextField *_registerField;
+    NSTextField *_speedField;
     NSView *_displayView;
     NXTMachine *_machine;
     NSTimer *_emulationTimer;
     unsigned int _displayTicks;
+    NXTUInt64 _speedSampleInstructions;
+    NSTimeInterval _speedSampleTime;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;

@@ -29,6 +29,7 @@ APP_EXECUTABLE := $(BUILD_DIR)/NeXTemu.app/NeXTemu
 endif
 
 CPPFLAGS := -ISources/NeXTemuCore -ISources/NeXTemuApp
+OPTFLAGS ?= -O3
 
 .PHONY: all clean test check-config
 
@@ -50,7 +51,7 @@ $(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FIL
 		rm -rf $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \
 		cp -R $(ROMS_DIR) $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \
 	fi
-	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
+	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(OPTFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
 else
 $(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FILES) | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/NeXTemu.app/Resources
@@ -59,11 +60,11 @@ $(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FIL
 		rm -rf $(BUILD_DIR)/NeXTemu.app/Resources/roms; \
 		cp -R $(ROMS_DIR) $(BUILD_DIR)/NeXTemu.app/Resources/roms; \
 	fi
-	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
+	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(OPTFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
 endif
 
 $(BUILD_DIR)/core-tests: $(CORE_SOURCES) $(TEST_SOURCE) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(CORE_SOURCES) $(TEST_SOURCE) $(FOUNDATION_LIBS) -o $@
+	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(OPTFLAGS) $(CORE_SOURCES) $(TEST_SOURCE) $(FOUNDATION_LIBS) -o $@
 
 test: check-config $(BUILD_DIR)/core-tests
 	./$(BUILD_DIR)/core-tests

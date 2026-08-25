@@ -108,6 +108,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [_romField release];
     [_statusField release];
     [_registerField release];
+    [_speedField release];
     [_machine release];
     [_window release];
     [super dealloc];
@@ -202,7 +203,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [openButton setAction:@selector(openROM:)];
     [contentView addSubview:openButton];
 
-    _romField = [NXTCreateLabel(NSMakeRect(24, 110, 530, 22), @"No ROM selected") retain];
+    _romField = [NXTCreateLabel(NSMakeRect(24, 110, 530, 22), @"ROM: No ROM selected") retain];
     [_romField setLineBreakMode:NSLineBreakByTruncatingMiddle];
     [contentView addSubview:_romField];
 
@@ -244,6 +245,10 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [_registerField setFont:[NSFont userFixedPitchFontOfSize:12.0]];
     [contentView addSubview:_registerField];
 
+    _speedField = [NXTCreateLabel(NSMakeRect(382, 50, 172, 22), @"Speed: —") retain];
+    [_speedField setAlignment:NSRightTextAlignment];
+    [contentView addSubview:_speedField];
+
     resetButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 28, 166, 32)] autorelease];
     [resetButton setTitle:@"Reset Machine"];
     [resetButton setBezelStyle:NSRoundedBezelStyle];
@@ -257,6 +262,14 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
             [subview setAutoresizingMask:NSViewNotSizable];
         }
     }
+    /* Keep the configuration actions aligned with the framebuffer's right edge. */
+    [openButton setAutoresizingMask:NSViewMinXMargin];
+    [diskButton setAutoresizingMask:NSViewMinXMargin];
+    [resetButton setAutoresizingMask:NSViewMinXMargin];
+    [scaleLabel setAutoresizingMask:NSViewMinXMargin];
+    [_framebufferScaleButton setAutoresizingMask:NSViewMinXMargin];
+    [_speedField setAutoresizingMask:NSViewMinXMargin];
+    [_diskField setAutoresizingMask:NSViewWidthSizable];
     {
         NSInteger savedScale = [[NSUserDefaults standardUserDefaults]
             integerForKey:NXTFramebufferScaleDefaultsKey];
@@ -397,7 +410,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         }
     }
     [(NXTDisplayView *)_displayView setMemory:[_machine memory]];
-    [_romField setStringValue:path];
+    [_romField setStringValue:[NSString stringWithFormat:@"ROM: %@", path]];
     [self resetMachine:self];
     return YES;
 }
@@ -408,6 +421,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     if (_machine == nil) {
         NSBeep();
         [_statusField setStringValue:@"Stopped — choose a 128 KiB NeXT ROM image"];
+        [_speedField setStringValue:@"Speed: —"];
         return;
     }
     if (![_machine reset]) {
@@ -416,6 +430,9 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     }
     [_statusField setStringValue:@"Running firmware…"];
     [_registerField setStringValue:@"SSP: 04000400    PC: 0100001e"];
+    [_speedField setStringValue:@"Speed: measuring…"];
+    _speedSampleInstructions = [[_machine processor] instructionsExecuted];
+    _speedSampleTime = [NSDate timeIntervalSinceReferenceDate];
     [_displayView setNeedsDisplay:YES];
 }
 
@@ -469,9 +486,19 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     NSString *registers;
     NSString *status;
     NXTProcessorResult result;
+    NSTimeInterval now;
+    NSTimeInterval elapsed;
+    NSTimeInterval runDeadline;
+    NXTUInt64 instructionCount;
     (void)timer;
     if (_machine == nil || [[_machine processor] isStopped]) return;
-    result = [_machine runForInstructionCount:100000];
+    /* Spend one display-timer quantum running the guest, but use small batches
+       so Cocoa still gets control back promptly for input and repainting. */
+    runDeadline = [NSDate timeIntervalSinceReferenceDate] + 0.010;
+    do {
+        result = [_machine runForInstructionCount:10000];
+    } while (result == NXTProcessorResultInstructionLimit &&
+             [NSDate timeIntervalSinceReferenceDate] < runDeadline);
     if (result == NXTProcessorResultStopped) {
         status = @"Processor stopped normally";
     } else if (result == NXTProcessorResultInstructionLimit) {
@@ -490,6 +517,18 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         (unsigned int)[[_machine processor] programCounter]];
     [_registerField setStringValue:registers];
     _displayTicks++;
+    now = [NSDate timeIntervalSinceReferenceDate];
+    elapsed = now - _speedSampleTime;
+    if (elapsed >= 0.5) {
+        double relativeSpeed;
+        instructionCount = [[_machine processor] instructionsExecuted];
+        relativeSpeed = ((double)(instructionCount - _speedSampleInstructions) / elapsed) /
+            ((double)[_machine clockSpeedMHz] * 1000000.0);
+        [_speedField setStringValue:[NSString stringWithFormat:@"Speed: %.0f%% real-time",
+            relativeSpeed * 100.0]];
+        _speedSampleInstructions = instructionCount;
+        _speedSampleTime = now;
+    }
     if ((_displayTicks % 5) == 0) [_displayView setNeedsDisplay:YES];
 }
 
