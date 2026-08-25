@@ -13,6 +13,8 @@
     NSTextField *_registerField;
     NSView *_displayView;
     NXTMachine *_machine;
+    NSTimer *_emulationTimer;
+    unsigned int _displayTicks;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;
@@ -20,6 +22,8 @@
 - (void)openROM:(id)sender;
 - (void)resetMachine:(id)sender;
 - (void)showAboutPanel:(id)sender;
+- (BOOL)loadROMAtPath:(NSString *)path showErrors:(BOOL)showErrors;
+- (void)emulationTick:(NSTimer *)timer;
 
 @end
 

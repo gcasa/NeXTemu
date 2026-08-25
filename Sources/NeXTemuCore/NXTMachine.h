@@ -15,6 +15,7 @@ typedef enum {
     NXTMemory *_memory;
     NXTMC68040 *_processor;
     NXTMemoryRegion *_romRegion;
+    NXTMemoryRegion *_romAliasRegion;
     NXTMemoryRegion *_ramRegion;
 }
 

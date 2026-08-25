@@ -9,15 +9,18 @@ The project currently provides:
 
 * a sparse, big-endian physical memory bus;
 * ROM and RAM regions with bounds and write-protection checks;
-* an initial MC68040 interpreter with reset, branches, subroutines, selected
-  data movement/arithmetic instructions, and explicit bus/illegal-opcode stops;
+* an initial MC68040 interpreter with reset, common effective-address modes,
+  branches, subroutines, stack frames, firmware control setup, selected data
+  movement/arithmetic instructions, and explicit bus/illegal-opcode stops;
 * a NeXTcube machine composition and AppKit ROM loader;
 * a native application window shared by Cocoa and GNUstep; and
 * core tests runnable without a ROM image.
 
-It executes a deliberately small, tested subset of 68040 instructions. It does
-**not** yet implement the complete CPU, NeXT chipset and peripherals required to
-boot a NeXT ROM.
+It executes a deliberately incomplete, tested subset of 68040 instructions and
+provides sparse early-boot device register banks. This is enough to load a ROM,
+enter its reset path, and exercise initial hardware probes. It does **not** yet
+implement the complete CPU, MMU, NeXT chipset, storage, or display pipeline
+required to boot NeXTSTEP.
 
 ## Build on macOS
 
@@ -48,5 +51,17 @@ features. Ownership follows manual retain/release rules.
 
 ## Firmware
 
-No NeXT firmware is included. A future boot-capable build will require the user
-to provide a legally obtained ROM image.
+No NeXT firmware is included. Firmware startup requires the user to provide a
+legally obtained ROM image.
+
+Place legally obtained, uncompressed NeXT ROM dumps in the top-level `roms/`
+directory. If that directory exists, `make` copies it into the application
+resources as `roms/`. At launch, the application automatically loads the first
+valid bundled ROM; a different image can be selected with **Machine > Open
+ROM**. ROM images must be exactly 128 KiB (131,072 bytes), and discovery does
+not depend on a particular filename.
+
+For the 25 MHz NeXTcube, use a NeXTcube/NeXTstation 68040 ROM such as revision
+2.5 v66. For the 33 MHz NeXTcube Turbo, use a Turbo-capable ROM such as revision
+3.3 v74 (revision 3.2 v72 is also commonly available). Do not use the 68030
+NeXT Computer ROM or a NeXTdimension EEPROM.

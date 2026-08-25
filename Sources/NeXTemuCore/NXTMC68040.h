@@ -24,6 +24,13 @@ typedef enum {
     NXTUInt32 _lastOpcodeAddress;
     NXTUInt16 _lastOpcode;
     NXTUInt64 _instructionsExecuted;
+    NXTUInt32 _vectorBaseRegister;
+    NXTUInt32 _userStackPointer;
+    NXTUInt32 _masterStackPointer;
+    NXTUInt32 _interruptStackPointer;
+    NXTUInt32 _translationControl;
+    NXTUInt32 _userRootPointer;
+    NXTUInt32 _supervisorRootPointer;
 }
 
 - (id)initWithMemory:(NXTMemory *)memory;

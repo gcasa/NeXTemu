@@ -1,9 +1,23 @@
 #import "NXTMachine.h"
 
-/* Temporary bootstrap map. Device-accurate NeXT physical decoding follows. */
-#define NXT_ROM_BASE 0x00000000U
+/* The boot ROM is visible at zero during reset and at its normal address. */
+#define NXT_ROM_BOOT_BASE 0x00000000U
+#define NXT_ROM_BASE 0x01000000U
 #define NXT_ROM_SIZE 0x00020000U
 #define NXT_RAM_BASE 0x04000000U
+
+static BOOL NXTAddRegisterBank(NXTMemory *memory, NXTUInt32 base, NXTUInt32 length)
+{
+    NXTMemoryRegion *region;
+    BOOL result;
+    region = [[NXTMemoryRegion alloc] initWithBaseAddress:base
+                                                  length:length
+                                                readOnly:NO];
+    if (region == nil) return NO;
+    result = [memory addRegion:region];
+    [region release];
+    return result;
+}
 
 @implementation NXTMachine
 
@@ -13,14 +27,41 @@
     if (self != nil) {
         _model = model;
         _memory = [[NXTMemory alloc] init];
-        _romRegion = [[NXTMemoryRegion alloc] initWithBaseAddress:NXT_ROM_BASE
+        _romRegion = [[NXTMemoryRegion alloc] initWithBaseAddress:NXT_ROM_BOOT_BASE
                                                           length:NXT_ROM_SIZE
                                                         readOnly:YES];
+        _romAliasRegion = [[NXTMemoryRegion alloc] initWithBaseAddress:NXT_ROM_BASE
+                                                               length:NXT_ROM_SIZE
+                                                             readOnly:YES];
         _ramRegion = [[NXTMemoryRegion alloc] initWithBaseAddress:NXT_RAM_BASE
                                                           length:ramSize
                                                         readOnly:NO];
-        if (_memory == nil || _romRegion == nil || _ramRegion == nil ||
-            ![_memory addRegion:_romRegion] || ![_memory addRegion:_ramRegion]) {
+        if (_memory == nil || _romRegion == nil || _romAliasRegion == nil ||
+            _ramRegion == nil || ![_memory addRegion:_romRegion] ||
+            ![_memory addRegion:_romAliasRegion] || ![_memory addRegion:_ramRegion]) {
+            [self release];
+            return nil;
+        }
+        /* Sparse stand-ins keep early firmware probing on the physical bus.
+           Device-specific side effects can replace these banks independently. */
+        if (!NXTAddRegisterBank(_memory, 0x02000000U, 0x00005000U) || /* DMA */
+            !NXTAddRegisterBank(_memory, 0x02005000U, 0x00009000U) || /* system */
+            !NXTAddRegisterBank(_memory, 0x0200e000U, 0x00000020U) || /* keyboard */
+            !NXTAddRegisterBank(_memory, 0x020c0000U, 0x00000040U) || /* BMAP */
+            !NXTAddRegisterBank(_memory, 0x02100000U, 0x00000020U) || /* ethernet */
+            !NXTAddRegisterBank(_memory, 0x02106000U, 0x00000020U) ||
+            !NXTAddRegisterBank(_memory, 0x02110000U, 0x00000010U) ||
+            !NXTAddRegisterBank(_memory, 0x02112000U, 0x00000010U) ||
+            !NXTAddRegisterBank(_memory, 0x02114000U, 0x00000020U) || /* SCSI */
+            !NXTAddRegisterBank(_memory, 0x02114108U, 0x00000004U) ||
+            !NXTAddRegisterBank(_memory, 0x02118000U, 0x00000014U) || /* serial */
+            !NXTAddRegisterBank(_memory, 0x0211a000U, 0x00000004U) || /* timer */
+            !NXTAddRegisterBank(_memory, 0x02200000U, 0x00010000U) || /* TMC */
+            !NXTAddRegisterBank(_memory, 0x02210000U, 0x00010000U) || /* Turbo slot */
+            !NXTAddRegisterBank(_memory,
+                model == NXTMachineModelNeXTcubeTurbo ? 0x0c000000U : 0x0b000000U,
+                0x001cb100U) || /* display */
+            !NXTAddRegisterBank(_memory, 0x820c0000U, 0x00000040U)) {
             [self release];
             return nil;
         }
@@ -37,6 +78,7 @@
 {
     [_processor release];
     [_ramRegion release];
+    [_romAliasRegion release];
     [_romRegion release];
     [_memory release];
     [super dealloc];
@@ -55,14 +97,30 @@
         if (errorMessage != NULL) *errorMessage = @"ROM image must be exactly 128 KiB";
         return NO;
     }
-    if ([_memory loadData:data atAddress:NXT_ROM_BASE] != NXTMemoryResultOK) {
+    if ([_memory loadData:data atAddress:NXT_ROM_BOOT_BASE] != NXTMemoryResultOK ||
+        [_memory loadData:data atAddress:NXT_ROM_BASE] != NXTMemoryResultOK) {
         if (errorMessage != NULL) *errorMessage = @"Unable to map ROM image";
         return NO;
     }
     return YES;
 }
 
-- (BOOL)reset { return [_processor reset]; }
+- (BOOL)reset
+{
+    /* NeXT peripheral-controller power-on values used for board/model and
+       RTC detection by the ROM. */
+    NXTUInt32 scr1;
+    NXTUInt32 scr2;
+    scr1 = _model == NXTMachineModelNeXTcubeTurbo ? 0xf0004000U : 0x00011102U;
+    scr2 = _model == NXTMachineModelNeXTcubeTurbo ? 0x000f1080U : 0x00ff0c80U;
+    [_memory resetNeXTDevicesForTurbo:_model == NXTMachineModelNeXTcubeTurbo];
+    if ([_memory writeLong:scr1 atAddress:0x0200c000U] != NXTMemoryResultOK ||
+        [_memory writeLong:scr2 atAddress:0x0200d000U] != NXTMemoryResultOK ||
+        (_model == NXTMachineModelNeXTcubeTurbo &&
+         [_memory writeLong:0x0fff4fafU atAddress:0x02200000U] != NXTMemoryResultOK))
+        return NO;
+    return [_processor reset];
+}
 - (NXTProcessorResult)runForInstructionCount:(NXTUInt32)count
 {
     return [_processor runForInstructionCount:count];

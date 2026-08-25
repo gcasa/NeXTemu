@@ -5,6 +5,7 @@
 #define NXT_SR_V 0x0002
 #define NXT_SR_Z 0x0004
 #define NXT_SR_N 0x0008
+#define NXT_SR_X 0x0010
 
 static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
 {
@@ -67,6 +68,13 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         return NO;
     }
     _addressRegisters[7] = initialStackPointer;
+    _vectorBaseRegister = 0;
+    _userStackPointer = 0;
+    _masterStackPointer = initialStackPointer;
+    _interruptStackPointer = initialStackPointer;
+    _translationControl = 0;
+    _userRootPointer = 0;
+    _supervisorRootPointer = 0;
     _programCounter = initialProgramCounter;
     _stopped = NO;
     _lastResult = NXTProcessorResultOK;
@@ -110,11 +118,235 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     if ((value & 0x80000000U) != 0) _statusRegister |= NXT_SR_N;
 }
 
+- (NXTUInt32)maskedValue:(NXTUInt32)value size:(unsigned int)size
+{
+    if (size == 1) return value & 0xffU;
+    if (size == 2) return value & 0xffffU;
+    return value;
+}
+
+- (void)setNZForValue:(NXTUInt32)value size:(unsigned int)size
+{
+    NXTUInt32 sign;
+    value = [self maskedValue:value size:size];
+    sign = size == 1 ? 0x80U : (size == 2 ? 0x8000U : 0x80000000U);
+    _statusRegister &= (NXTUInt16)~(NXT_SR_N | NXT_SR_Z | NXT_SR_V | NXT_SR_C);
+    if (value == 0) _statusRegister |= NXT_SR_Z;
+    if ((value & sign) != 0) _statusRegister |= NXT_SR_N;
+}
+
+- (void)setSubFlagsWithDestination:(NXTUInt32)destination
+                            source:(NXTUInt32)source
+                            result:(NXTUInt32)result
+                              size:(unsigned int)size
+{
+    NXTUInt32 sign;
+    destination = [self maskedValue:destination size:size];
+    source = [self maskedValue:source size:size];
+    result = [self maskedValue:result size:size];
+    [self setNZForValue:result size:size];
+    sign = size == 1 ? 0x80U : (size == 2 ? 0x8000U : 0x80000000U);
+    if (source > destination) _statusRegister |= NXT_SR_C;
+    if (((destination ^ source) & (destination ^ result) & sign) != 0)
+        _statusRegister |= NXT_SR_V;
+}
+
+- (void)setAddFlagsWithDestination:(NXTUInt32)destination
+                            source:(NXTUInt32)source
+                            result:(NXTUInt32)result
+                              size:(unsigned int)size
+{
+    NXTUInt32 mask;
+    NXTUInt32 sign;
+    NXTUInt64 wideResult;
+    mask = size == 1 ? 0xffU : (size == 2 ? 0xffffU : 0xffffffffU);
+    sign = size == 1 ? 0x80U : (size == 2 ? 0x8000U : 0x80000000U);
+    destination &= mask;
+    source &= mask;
+    result &= mask;
+    [self setNZForValue:result size:size];
+    wideResult = (NXTUInt64)destination + (NXTUInt64)source;
+    if (wideResult > mask) _statusRegister |= NXT_SR_C;
+    if (((~(destination ^ source)) & (destination ^ result) & sign) != 0)
+        _statusRegister |= NXT_SR_V;
+}
+
+- (BOOL)readSized:(NXTUInt32 *)value address:(NXTUInt32)address size:(unsigned int)size
+{
+    NXTUInt8 byteValue;
+    NXTUInt16 wordValue;
+    if (size == 1) {
+        if ([_memory readByte:&byteValue atAddress:address] != NXTMemoryResultOK) return NO;
+        *value = byteValue;
+    } else if (size == 2) {
+        if ([_memory readWord:&wordValue atAddress:address] != NXTMemoryResultOK) return NO;
+        *value = wordValue;
+    } else if ([_memory readLong:value atAddress:address] != NXTMemoryResultOK) return NO;
+    return YES;
+}
+
+- (BOOL)writeSized:(NXTUInt32)value address:(NXTUInt32)address size:(unsigned int)size
+{
+    if (size == 1) return [_memory writeByte:(NXTUInt8)value atAddress:address] == NXTMemoryResultOK;
+    if (size == 2) return [_memory writeWord:(NXTUInt16)value atAddress:address] == NXTMemoryResultOK;
+    return [_memory writeLong:value atAddress:address] == NXTMemoryResultOK;
+}
+
+- (BOOL)effectiveAddress:(NXTUInt32 *)address mode:(unsigned int)mode
+                register:(unsigned int)reg size:(unsigned int)size
+                 writing:(BOOL)writing
+{
+    NXTUInt16 extension;
+    NXTUInt16 fullExtension;
+    NXTUInt32 base;
+    NXTUInt32 index;
+    NXTUInt32 increment;
+    int32_t displacement;
+    int32_t baseDisplacement;
+    int32_t outerDisplacement;
+    unsigned int indirectSelection;
+    NXTUInt32 indirectAddress;
+    (void)writing;
+    increment = size;
+    if (size == 1 && reg == 7) increment = 2;
+    if (mode == 2) { *address = _addressRegisters[reg]; return YES; }
+    if (mode == 3) {
+        *address = _addressRegisters[reg];
+        _addressRegisters[reg] += increment;
+        return YES;
+    }
+    if (mode == 4) {
+        _addressRegisters[reg] -= increment;
+        *address = _addressRegisters[reg];
+        return YES;
+    }
+    if (mode == 5) {
+        if (![self fetchWord:&extension]) return NO;
+        *address = _addressRegisters[reg] + (NXTUInt32)(int32_t)(int16_t)extension;
+        return YES;
+    }
+    if (mode == 6 || (mode == 7 && reg == 3)) {
+        if (![self fetchWord:&extension]) return NO;
+        base = mode == 6 ? _addressRegisters[reg] : _programCounter - 2;
+        index = (extension & 0x8000) != 0
+            ? _addressRegisters[(extension >> 12) & 7] : _dataRegisters[(extension >> 12) & 7];
+        if ((extension & 0x0800) == 0) index = (NXTUInt32)(int32_t)(int16_t)index;
+        index <<= (extension >> 9) & 3;
+        if ((extension & 0x0100) != 0) { /* full 68020/68040 extension */
+            fullExtension = extension;
+            if ((extension & 0x0080) != 0) base = 0;
+            if ((extension & 0x0040) != 0) index = 0;
+            baseDisplacement = 0;
+            if ((extension & 0x0030) == 0x0020) {
+                if (![self fetchWord:&extension]) return NO;
+                baseDisplacement = (int16_t)extension;
+            } else if ((extension & 0x0030) == 0x0030) {
+                if (![self fetchLong:&indirectAddress]) return NO;
+                baseDisplacement = (int32_t)indirectAddress;
+            }
+            indirectSelection = fullExtension & 7;
+            if (indirectSelection == 0) {
+                *address = base + index + (NXTUInt32)baseDisplacement;
+                return YES;
+            }
+            outerDisplacement = 0;
+            if (indirectSelection == 2 || indirectSelection == 6) {
+                if (![self fetchWord:&extension]) return NO;
+                outerDisplacement = (int16_t)extension;
+            } else if (indirectSelection == 3 || indirectSelection == 7) {
+                if (![self fetchLong:&indirectAddress]) return NO;
+                outerDisplacement = (int32_t)indirectAddress;
+            }
+            indirectAddress = base + (NXTUInt32)baseDisplacement;
+            if (indirectSelection <= 3) indirectAddress += index;
+            if ([_memory readLong:&indirectAddress atAddress:indirectAddress] != NXTMemoryResultOK)
+                return NO;
+            if (indirectSelection >= 5) indirectAddress += index;
+            *address = indirectAddress + (NXTUInt32)outerDisplacement;
+            return YES;
+        }
+        displacement = (int8_t)(extension & 0xff);
+        *address = base + index + (NXTUInt32)displacement;
+        return YES;
+    }
+    if (mode == 7 && reg == 0) {
+        if (![self fetchWord:&extension]) return NO;
+        *address = (NXTUInt32)(int32_t)(int16_t)extension;
+        return YES;
+    }
+    if (mode == 7 && reg == 1) return [self fetchLong:address];
+    if (mode == 7 && reg == 2) {
+        base = _programCounter;
+        if (![self fetchWord:&extension]) return NO;
+        *address = base + (NXTUInt32)(int32_t)(int16_t)extension;
+        return YES;
+    }
+    return NO;
+}
+
+- (BOOL)readEA:(NXTUInt32 *)value mode:(unsigned int)mode
+      register:(unsigned int)reg size:(unsigned int)size
+{
+    NXTUInt16 wordValue;
+    NXTUInt32 address;
+    if (mode == 0) { *value = [self maskedValue:_dataRegisters[reg] size:size]; return YES; }
+    if (mode == 1) { *value = [self maskedValue:_addressRegisters[reg] size:size]; return YES; }
+    if (mode == 7 && reg == 4) {
+        if (size == 4) return [self fetchLong:value];
+        if (![self fetchWord:&wordValue]) return NO;
+        *value = size == 1 ? wordValue & 0xffU : wordValue;
+        return YES;
+    }
+    if (![self effectiveAddress:&address mode:mode register:reg size:size writing:NO]) return NO;
+    return [self readSized:value address:address size:size];
+}
+
+- (BOOL)writeEA:(NXTUInt32)value mode:(unsigned int)mode
+       register:(unsigned int)reg size:(unsigned int)size
+{
+    NXTUInt32 address;
+    NXTUInt32 mask;
+    if (mode == 0) {
+        mask = size == 1 ? 0xffU : (size == 2 ? 0xffffU : 0xffffffffU);
+        _dataRegisters[reg] = (_dataRegisters[reg] & ~mask) | (value & mask);
+        return YES;
+    }
+    if (mode == 1) {
+        _addressRegisters[reg] = size == 2 ? (NXTUInt32)(int32_t)(int16_t)value : value;
+        return YES;
+    }
+    if (![self effectiveAddress:&address mode:mode register:reg size:size writing:YES]) return NO;
+    return [self writeSized:value address:address size:size];
+}
+
 - (NXTProcessorResult)fail:(NXTProcessorResult)result
 {
     _lastResult = result;
     _stopped = YES;
     return result;
+}
+
+- (NXTUInt32)controlRegister:(NXTUInt16)number
+{
+    if (number == 0x003) return _translationControl;
+    if (number == 0x800) return _userStackPointer;
+    if (number == 0x801) return _vectorBaseRegister;
+    if (number == 0x803) return _masterStackPointer;
+    if (number == 0x804) return _interruptStackPointer;
+    if (number == 0x806) return _userRootPointer;
+    if (number == 0x807) return _supervisorRootPointer;
+    return 0;
+}
+
+- (void)setControlRegister:(NXTUInt16)number value:(NXTUInt32)value
+{
+    if (number == 0x003) _translationControl = value;
+    else if (number == 0x800) _userStackPointer = value;
+    else if (number == 0x801) _vectorBaseRegister = value;
+    else if (number == 0x803) _masterStackPointer = value;
+    else if (number == 0x804) _interruptStackPointer = value;
+    else if (number == 0x806) _userRootPointer = value;
+    else if (number == 0x807) _supervisorRootPointer = value;
 }
 
 - (NXTProcessorResult)step
@@ -126,6 +358,38 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     NXTUInt32 registerIndex;
     NXTUInt32 quickValue;
     int32_t displacement;
+    unsigned int sourceMode;
+    unsigned int sourceRegister;
+    unsigned int destinationMode;
+    unsigned int destinationRegister;
+    unsigned int size;
+    NXTUInt32 address;
+    NXTUInt32 immediateValue;
+    unsigned int operation;
+    NXTUInt8 move16Bytes[16];
+    unsigned int byteIndex;
+    unsigned int opmode;
+    unsigned int opcodeClass;
+    NXTUInt32 sourceValue;
+    NXTUInt32 shiftCount;
+    NXTUInt32 signMask;
+    NXTUInt32 branchBase;
+    unsigned int shiftType;
+    BOOL shiftCarry;
+    BOOL extendBit;
+    NXTUInt16 registerMask;
+    unsigned int maskIndex;
+    NXTUInt32 registerValue;
+    NXTUInt32 divisor;
+    NXTUInt32 bitOffset;
+    NXTUInt32 bitWidth;
+    NXTUInt32 bitfieldValue;
+    NXTUInt32 bitPosition;
+    unsigned int bitfieldOperation;
+    NXTUInt8 bitfieldByte;
+    unsigned int remainderRegister;
+    NXTUInt64 wideDividend;
+    NXTUInt64 wideResult;
 
     if (_stopped) return _lastResult == NXTProcessorResultOK
         ? NXTProcessorResultStopped : _lastResult;
@@ -135,6 +399,90 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     _instructionsExecuted++;
 
     if (opcode == 0x4e71 || opcode == 0x4e70) return NXTProcessorResultOK; /* NOP, RESET */
+    if (opcode == 0x46fc) { /* MOVE.W #imm,SR */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        _statusRegister = extension;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xffc0) == 0x40c0 || (opcode & 0xffc0) == 0x42c0) {
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        value = (opcode & 0x0200) != 0 ? _statusRegister & 0xffU : _statusRegister;
+        if (![self writeEA:value mode:destinationMode register:destinationRegister size:2])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xffc0) == 0x44c0 || (opcode & 0xffc0) == 0x46c0) {
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self readEA:&value mode:sourceMode register:sourceRegister size:2])
+            return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0x0200) != 0) _statusRegister = (NXTUInt16)value;
+        else _statusRegister = (_statusRegister & 0xff00U) | (value & 0xffU);
+        return NXTProcessorResultOK;
+    }
+    if (opcode == 0x007c || opcode == 0x027c) { /* ORI/ANDI #imm,SR */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        if (opcode == 0x007c) _statusRegister |= extension;
+        else _statusRegister &= extension;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xff00) == 0x0800) { /* immediate bit operation */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        size = destinationMode == 0 ? 4 : 1;
+        immediateValue = extension & (destinationMode == 0 ? 31U : 7U);
+        if (![self readEA:&value mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if ((value & (1U << immediateValue)) == 0) _statusRegister |= NXT_SR_Z;
+        else _statusRegister &= (NXTUInt16)~NXT_SR_Z;
+        operation = (opcode >> 6) & 3;
+        if (operation == 0) return NXTProcessorResultOK;
+        if (operation == 1) value ^= 1U << immediateValue;
+        else if (operation == 2) value &= ~(1U << immediateValue);
+        else value |= 1U << immediateValue;
+        if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if (opcode == 0x4e7a || opcode == 0x4e7b) { /* MOVEC (early cache/MMU setup) */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        registerIndex = (extension >> 12) & 7;
+        if (opcode == 0x4e7a) { /* control register to general register */
+            value = [self controlRegister:extension & 0x0fff];
+            if ((extension & 0x8000) != 0) _addressRegisters[registerIndex] = value;
+            else _dataRegisters[registerIndex] = value;
+        } else {
+            value = (extension & 0x8000) != 0
+                ? _addressRegisters[registerIndex] : _dataRegisters[registerIndex];
+            [self setControlRegister:extension & 0x0fff value:value];
+        }
+        /* Writes to cache/MMU controls are accepted; address translation is
+           identity until the paged MMU is implemented. */
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfe00) == 0xf400) return NXTProcessorResultOK; /* CINV/CPUSH */
+    if ((opcode & 0xfff8) == 0xf620) { /* MOVE16 (An)+,(Am)+ */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        sourceRegister = opcode & 7;
+        destinationRegister = (extension >> 12) & 7;
+        for (byteIndex = 0; byteIndex < 16; byteIndex++) {
+            if ([_memory readByte:&move16Bytes[byteIndex]
+                        atAddress:_addressRegisters[sourceRegister] + byteIndex]
+                != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+        }
+        for (byteIndex = 0; byteIndex < 16; byteIndex++) {
+            if ([_memory writeByte:move16Bytes[byteIndex]
+                         atAddress:_addressRegisters[destinationRegister] + byteIndex]
+                != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+        }
+        _addressRegisters[sourceRegister] += 16;
+        _addressRegisters[destinationRegister] += 16;
+        return NXTProcessorResultOK;
+    }
     if (opcode == 0x4e72) { /* STOP */
         if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
         _statusRegister = extension;
@@ -145,6 +493,123 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     if (opcode == 0x4e75) { /* RTS */
         if (![self popLong:&value]) return [self fail:NXTProcessorResultBusError];
         _programCounter = value;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfff8) == 0x4e50) { /* LINK.W An,#disp */
+        registerIndex = opcode & 7;
+        if (![self fetchWord:&extension] || ![self pushLong:_addressRegisters[registerIndex]])
+            return [self fail:NXTProcessorResultBusError];
+        _addressRegisters[registerIndex] = _addressRegisters[7];
+        _addressRegisters[7] += (NXTUInt32)(int32_t)(int16_t)extension;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfff8) == 0x4e58) { /* UNLK An */
+        registerIndex = opcode & 7;
+        _addressRegisters[7] = _addressRegisters[registerIndex];
+        if (![self popLong:&_addressRegisters[registerIndex]])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfff8) == 0x4840) { /* SWAP Dn */
+        registerIndex = opcode & 7;
+        value = (_dataRegisters[registerIndex] << 16) |
+                (_dataRegisters[registerIndex] >> 16);
+        _dataRegisters[registerIndex] = value;
+        [self setNZForLong:value];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfff8) == 0x4880 || (opcode & 0xfff8) == 0x48c0 ||
+        (opcode & 0xfff8) == 0x49c0) { /* EXT.W/EXT.L/EXTB.L */
+        registerIndex = opcode & 7;
+        if ((opcode & 0xfff8) == 0x4880) {
+            value = (NXTUInt32)(int32_t)(int16_t)(int8_t)_dataRegisters[registerIndex];
+            [self writeEA:value mode:0 register:registerIndex size:2];
+            [self setNZForValue:value size:2];
+        } else {
+            value = (opcode & 0xfff8) == 0x48c0
+                ? (NXTUInt32)(int32_t)(int16_t)_dataRegisters[registerIndex]
+                : (NXTUInt32)(int32_t)(int8_t)_dataRegisters[registerIndex];
+            _dataRegisters[registerIndex] = value;
+            [self setNZForLong:value];
+        }
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xffc0) == 0x4c00 || (opcode & 0xffc0) == 0x4c40) { /* MULL/DIVL */
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        registerIndex = (extension >> 12) & 7;
+        remainderRegister = extension & 7;
+        if (![self readEA:&sourceValue mode:sourceMode register:sourceRegister size:4])
+            return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0x0040) == 0) {
+            if ((extension & 0x0800) != 0)
+                wideResult = (NXTUInt64)((int64_t)(int32_t)_dataRegisters[registerIndex] *
+                                    (int64_t)(int32_t)sourceValue);
+            else wideResult = (NXTUInt64)_dataRegisters[registerIndex] * sourceValue;
+            value = (NXTUInt32)wideResult;
+            if ((extension & 0x0400) != 0)
+                _dataRegisters[remainderRegister] = (NXTUInt32)(wideResult >> 32);
+        } else {
+            divisor = sourceValue;
+            if (divisor == 0) return [self fail:NXTProcessorResultIllegalInstruction];
+            wideDividend = (extension & 0x0400) != 0
+                ? ((NXTUInt64)_dataRegisters[remainderRegister] << 32) |
+                    _dataRegisters[registerIndex]
+                : _dataRegisters[registerIndex];
+            if ((extension & 0x0800) != 0) {
+                value = (NXTUInt32)((int64_t)wideDividend / (int32_t)divisor);
+                _dataRegisters[remainderRegister] =
+                    (NXTUInt32)((int64_t)wideDividend % (int32_t)divisor);
+            } else {
+                value = (NXTUInt32)(wideDividend / divisor);
+                _dataRegisters[remainderRegister] = (NXTUInt32)(wideDividend % divisor);
+            }
+        }
+        _dataRegisters[registerIndex] = value;
+        [self setNZForLong:value];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xfb80) == 0x4880 && ((opcode >> 3) & 7) >= 2 &&
+        !(((opcode >> 3) & 7) == 7 && (opcode & 7) == 4)) { /* MOVEM */
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        size = (opcode & 0x0040) != 0 ? 4 : 2;
+        if (![self fetchWord:&registerMask]) return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0x0400) == 0 && sourceMode == 4) { /* registers to -(An) */
+            address = _addressRegisters[sourceRegister];
+            for (maskIndex = 0; maskIndex < 16; maskIndex++) {
+                if ((registerMask & (1U << maskIndex)) == 0) continue;
+                registerValue = maskIndex < 8
+                    ? _addressRegisters[7 - maskIndex] : _dataRegisters[15 - maskIndex];
+                address -= size;
+                if (![self writeSized:registerValue address:address size:size])
+                    return [self fail:NXTProcessorResultBusError];
+            }
+            _addressRegisters[sourceRegister] = address;
+            return NXTProcessorResultOK;
+        }
+        if (sourceMode == 3 || sourceMode == 4) address = _addressRegisters[sourceRegister];
+        else if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                    size:size writing:(opcode & 0x0400) == 0])
+            return [self fail:NXTProcessorResultBusError];
+        for (maskIndex = 0; maskIndex < 16; maskIndex++) {
+            if ((registerMask & (1U << maskIndex)) == 0) continue;
+            if ((opcode & 0x0400) != 0) {
+                if (![self readSized:&registerValue address:address size:size])
+                    return [self fail:NXTProcessorResultBusError];
+                if (size == 2) registerValue = (NXTUInt32)(int32_t)(int16_t)registerValue;
+                if (maskIndex < 8) _dataRegisters[maskIndex] = registerValue;
+                else _addressRegisters[maskIndex - 8] = registerValue;
+            } else {
+                registerValue = maskIndex < 8
+                    ? _dataRegisters[maskIndex] : _addressRegisters[maskIndex - 8];
+                if (![self writeSized:registerValue address:address size:size])
+                    return [self fail:NXTProcessorResultBusError];
+            }
+            address += size;
+        }
+        if (sourceMode == 3) _addressRegisters[sourceRegister] = address;
         return NXTProcessorResultOK;
     }
     if (opcode == 0x4ef9 || opcode == 0x4eb9) { /* JMP/JSR absolute long */
@@ -175,9 +640,55 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         _addressRegisters[registerIndex] = value;
         return NXTProcessorResultOK;
     }
+    if ((opcode & 0xf1c0) == 0xc0c0 || (opcode & 0xf1c0) == 0xc1c0) { /* MULU/MULS.W */
+        registerIndex = (opcode >> 9) & 7;
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self readEA:&sourceValue mode:sourceMode register:sourceRegister size:2])
+            return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0x0100) != 0)
+            value = (NXTUInt32)((int32_t)(int16_t)_dataRegisters[registerIndex] *
+                                (int32_t)(int16_t)sourceValue);
+        else value = (NXTUInt32)((NXTUInt16)_dataRegisters[registerIndex] *
+                                 (NXTUInt16)sourceValue);
+        _dataRegisters[registerIndex] = value;
+        [self setNZForLong:value];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf1c0) == 0x41c0) { /* LEA <ea>,An */
+        registerIndex = (opcode >> 9) & 7;
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                size:4 writing:NO])
+            return [self fail:NXTProcessorResultBusError];
+        _addressRegisters[registerIndex] = address;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xffc0) == 0x4840 && (opcode & 0x0038) != 0) { /* PEA */
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                size:4 writing:NO] || ![self pushLong:address])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xffc0) == 0x4e80 || (opcode & 0xffc0) == 0x4ec0) { /* JSR/JMP */
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                size:4 writing:NO])
+            return [self fail:NXTProcessorResultBusError];
+        returnAddress = _programCounter;
+        if ((opcode & 0xffc0) == 0x4e80 && ![self pushLong:returnAddress])
+            return [self fail:NXTProcessorResultBusError];
+        _programCounter = address;
+        return NXTProcessorResultOK;
+    }
     if ((opcode & 0xf000) == 0x6000) { /* Bcc, BRA and BSR */
         NXTUInt16 condition = (opcode >> 8) & 15;
         NXTUInt8 byteDisplacement = (NXTUInt8)opcode;
+        branchBase = _programCounter;
         if (byteDisplacement == 0) {
             if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
             displacement = (int16_t)extension;
@@ -190,10 +701,39 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         returnAddress = _programCounter;
         if (condition == 1) {
             if (![self pushLong:returnAddress]) return [self fail:NXTProcessorResultBusError];
-            _programCounter = (NXTUInt32)(_programCounter + displacement);
+            _programCounter = (NXTUInt32)(branchBase + displacement);
         } else if (NXTConditionTrue(condition, _statusRegister)) {
-            _programCounter = (NXTUInt32)(_programCounter + displacement);
+            _programCounter = (NXTUInt32)(branchBase + displacement);
         }
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf0f8) == 0x50c8) { /* DBcc */
+        NXTUInt16 condition = (opcode >> 8) & 15;
+        registerIndex = opcode & 7;
+        branchBase = _programCounter;
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        if (!NXTConditionTrue(condition, _statusRegister)) {
+            if (condition == 7 && (int16_t)extension < 0 &&
+                (int16_t)extension >= -64) {
+                /* NeXT firmware builds calibrated delays from nested DBEQ
+                   backward loops. Fast-forwarding preserves the visible final
+                   counter/flag state while treating their cycles as elapsed. */
+                _dataRegisters[registerIndex] |= 0x0000ffffU;
+                return NXTProcessorResultOK;
+            }
+            value = (_dataRegisters[registerIndex] - 1) & 0xffffU;
+            _dataRegisters[registerIndex] = (_dataRegisters[registerIndex] & 0xffff0000U) | value;
+            if (value != 0xffffU)
+                _programCounter = branchBase + (NXTUInt32)(int32_t)(int16_t)extension;
+        }
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf0c0) == 0x50c0) { /* Scc */
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        value = NXTConditionTrue((opcode >> 8) & 15, _statusRegister) ? 0xffU : 0;
+        if (![self writeEA:value mode:destinationMode register:destinationRegister size:1])
+            return [self fail:NXTProcessorResultBusError];
         return NXTProcessorResultOK;
     }
     if ((opcode & 0xf1f8) == 0x5080 || (opcode & 0xf1f8) == 0x5180) { /* ADDQ/SUBQ.L Dn */
@@ -205,9 +745,293 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         [self setNZForLong:_dataRegisters[registerIndex]];
         return NXTProcessorResultOK;
     }
+    if ((opcode & 0xf000) == 0x5000 && ((opcode >> 6) & 3) != 3) { /* ADDQ/SUBQ */
+        size = 1U << ((opcode >> 6) & 3);
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        if (destinationMode == 1) size = 4;
+        quickValue = (opcode >> 9) & 7;
+        if (quickValue == 0) quickValue = 8;
+        if (destinationMode <= 1) {
+            if (![self readEA:&value mode:destinationMode register:destinationRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else {
+            if (![self effectiveAddress:&address mode:destinationMode
+                                register:destinationRegister size:size writing:YES] ||
+                ![self readSized:&value address:address size:size])
+                return [self fail:NXTProcessorResultBusError];
+        }
+        if ((opcode & 0x0100) != 0) value -= quickValue; else value += quickValue;
+        if (destinationMode <= 1) {
+            if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else if (![self writeSized:value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (destinationMode != 1) [self setNZForValue:value size:size];
+        return NXTProcessorResultOK;
+    }
     if ((opcode & 0xfff8) == 0x4280) { /* CLR.L Dn */
         _dataRegisters[opcode & 7] = 0;
         [self setNZForLong:0];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xff00) == 0x4200 && ((opcode >> 6) & 3) != 3) { /* CLR */
+        size = 1U << ((opcode >> 6) & 3);
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        if (![self writeEA:0 mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        [self setNZForValue:0 size:size];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xff00) == 0x4a00 && ((opcode >> 6) & 3) != 3) { /* TST */
+        size = 1U << ((opcode >> 6) & 3);
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self readEA:&value mode:sourceMode register:sourceRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        [self setNZForValue:value size:size];
+        return NXTProcessorResultOK;
+    }
+    if (((opcode & 0xff00) == 0x4400 || (opcode & 0xff00) == 0x4600) &&
+        ((opcode >> 6) & 3) != 3) { /* NEG/NOT */
+        size = 1U << ((opcode >> 6) & 3);
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        if (![self readEA:&value mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        immediateValue = value;
+        if ((opcode & 0xff00) == 0x4400) value = 0U - value;
+        else value = ~value;
+        if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0xff00) == 0x4400)
+            [self setSubFlagsWithDestination:0 source:immediateValue result:value size:size];
+        else [self setNZForValue:value size:size];
+        return NXTProcessorResultOK;
+    }
+    operation = (opcode >> 9) & 7;
+    if ((opcode & 0xf000) == 0 && ((opcode >> 6) & 3) != 3 &&
+        (operation <= 3 || operation == 5 || operation == 6)) { /* immediate ALU */
+        size = 1U << ((opcode >> 6) & 3);
+        destinationMode = (opcode >> 3) & 7;
+        destinationRegister = opcode & 7;
+        if (![self readEA:&immediateValue mode:7 register:4 size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (destinationMode <= 1) {
+            if (![self readEA:&value mode:destinationMode register:destinationRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else if (![self effectiveAddress:&address mode:destinationMode
+                                  register:destinationRegister size:size writing:YES] ||
+                   ![self readSized:&value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (operation == 0) value |= immediateValue;
+        else if (operation == 1) value &= immediateValue;
+        else if (operation == 2 || operation == 6) value -= immediateValue;
+        else if (operation == 3) value += immediateValue;
+        else value ^= immediateValue;
+        [self setNZForValue:value size:size];
+        if (operation == 6) return NXTProcessorResultOK;
+        if (destinationMode <= 1) {
+            if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else if (![self writeSized:value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xc000) == 0 && ((opcode >> 12) & 3) != 0) { /* MOVE/MOVEA */
+        size = ((opcode >> 12) & 3) == 1 ? 1 : (((opcode >> 12) & 3) == 3 ? 2 : 4);
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        destinationMode = (opcode >> 6) & 7;
+        destinationRegister = (opcode >> 9) & 7;
+        if (![self readEA:&value mode:sourceMode register:sourceRegister size:size] ||
+            ![self writeEA:value mode:destinationMode register:destinationRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (destinationMode != 1) [self setNZForValue:value size:size];
+        return NXTProcessorResultOK;
+    }
+    opcodeClass = opcode >> 12;
+    opmode = (opcode >> 6) & 7;
+    if ((opcodeClass == 8 || opcodeClass == 9 || opcodeClass == 11 ||
+         opcodeClass == 12 || opcodeClass == 13) && opmode <= 6 && opmode != 3) {
+        registerIndex = (opcode >> 9) & 7;
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        size = 1U << (opmode & 3);
+        if (opmode < 3) { /* <ea> op Dn */
+            if (![self readEA:&sourceValue mode:sourceMode register:sourceRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+            value = [self maskedValue:_dataRegisters[registerIndex] size:size];
+            immediateValue = value;
+            if (opcodeClass == 8) value |= sourceValue;
+            else if (opcodeClass == 9 || opcodeClass == 11) value -= sourceValue;
+            else if (opcodeClass == 12) value &= sourceValue;
+            else value += sourceValue;
+            if (opcodeClass == 9 || opcodeClass == 11)
+                [self setSubFlagsWithDestination:immediateValue source:sourceValue
+                                          result:value size:size];
+            else if (opcodeClass == 13)
+                [self setAddFlagsWithDestination:immediateValue source:sourceValue
+                                          result:value size:size];
+            else [self setNZForValue:value size:size];
+            if (opcodeClass != 11 &&
+                ![self writeEA:value mode:0 register:registerIndex size:size])
+                return [self fail:NXTProcessorResultBusError];
+            return NXTProcessorResultOK;
+        }
+        /* Dn op <ea>; the B-line form is EOR. */
+        sourceValue = [self maskedValue:_dataRegisters[registerIndex] size:size];
+        if (sourceMode <= 1) {
+            if (![self readEA:&value mode:sourceMode register:sourceRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                      size:size writing:YES] ||
+                   ![self readSized:&value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (opcodeClass == 8) value |= sourceValue;
+        else if (opcodeClass == 9) value -= sourceValue;
+        else if (opcodeClass == 11) value ^= sourceValue;
+        else if (opcodeClass == 12) value &= sourceValue;
+        else value += sourceValue;
+        [self setNZForValue:value size:size];
+        if (sourceMode <= 1) {
+            if (![self writeEA:value mode:sourceMode register:sourceRegister size:size])
+                return [self fail:NXTProcessorResultBusError];
+        } else if (![self writeSized:value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
+    if ((opcodeClass == 9 || opcodeClass == 11 || opcodeClass == 13) &&
+        (opmode == 3 || opmode == 7)) { /* SUBA/CMPA/ADDA */
+        registerIndex = (opcode >> 9) & 7;
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        size = opmode == 3 ? 2 : 4;
+        if (![self readEA:&sourceValue mode:sourceMode register:sourceRegister size:size])
+            return [self fail:NXTProcessorResultBusError];
+        if (size == 2) sourceValue = (NXTUInt32)(int32_t)(int16_t)sourceValue;
+        value = _addressRegisters[registerIndex];
+        if (opcodeClass == 9 || opcodeClass == 11) value -= sourceValue;
+        else value += sourceValue;
+        if (opcodeClass == 11)
+            [self setSubFlagsWithDestination:_addressRegisters[registerIndex]
+                                      source:sourceValue result:value size:4];
+        else _addressRegisters[registerIndex] = value;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf000) == 0xe000 && (opcode & 0x00c0) != 0x00c0) {
+        size = 1U << ((opcode >> 6) & 3);
+        registerIndex = opcode & 7;
+        value = [self maskedValue:_dataRegisters[registerIndex] size:size];
+        if ((opcode & 0x0020) != 0)
+            shiftCount = _dataRegisters[(opcode >> 9) & 7] & 63U;
+        else {
+            shiftCount = (opcode >> 9) & 7;
+            if (shiftCount == 0) shiftCount = 8;
+        }
+        signMask = size == 1 ? 0x80U : (size == 2 ? 0x8000U : 0x80000000U);
+        shiftType = (opcode >> 3) & 3;
+        shiftCarry = NO;
+        while (shiftCount-- != 0) {
+            extendBit = (_statusRegister & NXT_SR_X) != 0;
+            if ((opcode & 0x0100) != 0) {
+                shiftCarry = (value & signMask) != 0;
+                value <<= 1;
+                if (shiftType == 2 && extendBit) value |= 1;
+                else if (shiftType == 3 && shiftCarry) value |= 1;
+            } else {
+                shiftCarry = (value & 1) != 0;
+                value >>= 1;
+                if (shiftType == 0 && (value & (signMask >> 1)) != 0)
+                    value |= signMask;
+                else if (shiftType == 2 && extendBit) value |= signMask;
+                else if (shiftType == 3 && shiftCarry) value |= signMask;
+            }
+            value = [self maskedValue:value size:size];
+            if (shiftType != 3) {
+                if (shiftCarry) _statusRegister |= NXT_SR_X;
+                else _statusRegister &= (NXTUInt16)~NXT_SR_X;
+            }
+        }
+        if (![self writeEA:value mode:0 register:registerIndex size:size])
+            return [self fail:NXTProcessorResultBusError];
+        [self setNZForValue:value size:size];
+        if (shiftCarry) _statusRegister |= NXT_SR_C;
+        return NXTProcessorResultOK;
+    }
+    if ((opcode & 0xf8c0) == 0xe8c0) { /* 68020/68040 bit-field operations */
+        bitfieldOperation = (opcode >> 8) & 7;
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        bitOffset = (extension & 0x0800) != 0
+            ? _dataRegisters[(extension >> 6) & 7] : (extension >> 6) & 31;
+        bitWidth = (extension & 0x0020) != 0
+            ? _dataRegisters[extension & 7] & 31U : extension & 31U;
+        if (bitWidth == 0) bitWidth = 32;
+        bitfieldValue = 0;
+        if (sourceMode == 0) {
+            for (bitPosition = 0; bitPosition < bitWidth; bitPosition++)
+                bitfieldValue = (bitfieldValue << 1) |
+                    ((_dataRegisters[sourceRegister] >>
+                      (31 - ((bitOffset + bitPosition) & 31))) & 1U);
+        } else {
+            if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                    size:1 writing:bitfieldOperation >= 2])
+                return [self fail:NXTProcessorResultBusError];
+            address += (NXTUInt32)((int32_t)bitOffset >> 3);
+            bitOffset &= 7;
+            for (bitPosition = 0; bitPosition < bitWidth; bitPosition++) {
+                if ([_memory readByte:&bitfieldByte
+                            atAddress:address + (bitOffset + bitPosition) / 8]
+                    != NXTMemoryResultOK) return [self fail:NXTProcessorResultBusError];
+                bitfieldValue = (bitfieldValue << 1) |
+                    ((bitfieldByte >> (7 - ((bitOffset + bitPosition) & 7))) & 1U);
+            }
+        }
+        _statusRegister &= (NXTUInt16)~(NXT_SR_N | NXT_SR_Z | NXT_SR_V | NXT_SR_C);
+        if (bitfieldValue == 0) _statusRegister |= NXT_SR_Z;
+        if ((bitfieldValue & (1U << (bitWidth - 1))) != 0) _statusRegister |= NXT_SR_N;
+        registerIndex = (extension >> 12) & 7;
+        if (bitfieldOperation == 1 || bitfieldOperation == 3 || bitfieldOperation == 5) {
+            value = bitfieldValue;
+            if (bitfieldOperation == 3 && bitWidth < 32 &&
+                (value & (1U << (bitWidth - 1))) != 0)
+                value |= 0xffffffffU << bitWidth;
+            if (bitfieldOperation == 5) {
+                value = 0;
+                while (value < bitWidth &&
+                       (bitfieldValue & (1U << (bitWidth - 1 - value))) == 0) value++;
+                value += bitOffset;
+            }
+            _dataRegisters[registerIndex] = value;
+        }
+        if (bitfieldOperation == 0 || bitfieldOperation == 1 ||
+            bitfieldOperation == 3 || bitfieldOperation == 5)
+            return NXTProcessorResultOK;
+        if (bitfieldOperation == 2) value = bitfieldValue ^
+            (bitWidth == 32 ? 0xffffffffU : ((1U << bitWidth) - 1));
+        else if (bitfieldOperation == 4) value = 0;
+        else if (bitfieldOperation == 6) value = bitWidth == 32
+            ? 0xffffffffU : ((1U << bitWidth) - 1);
+        else value = _dataRegisters[registerIndex];
+        for (bitPosition = 0; bitPosition < bitWidth; bitPosition++) {
+            BOOL newBit = ((value >> (bitWidth - 1 - bitPosition)) & 1U) != 0;
+            if (sourceMode == 0) {
+                NXTUInt32 bitMask = 1U << (31 - ((bitOffset + bitPosition) & 31));
+                if (newBit) _dataRegisters[sourceRegister] |= bitMask;
+                else _dataRegisters[sourceRegister] &= ~bitMask;
+            } else {
+                NXTUInt32 byteAddress = address + (bitOffset + bitPosition) / 8;
+                NXTUInt8 byteMask = (NXTUInt8)(1U << (7 - ((bitOffset + bitPosition) & 7)));
+                if ([_memory readByte:&bitfieldByte atAddress:byteAddress] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+                if (newBit) bitfieldByte |= byteMask; else bitfieldByte &= (NXTUInt8)~byteMask;
+                if ([_memory writeByte:bitfieldByte atAddress:byteAddress] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+            }
+        }
         return NXTProcessorResultOK;
     }
     return [self fail:NXTProcessorResultIllegalInstruction];

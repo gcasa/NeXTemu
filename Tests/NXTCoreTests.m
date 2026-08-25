@@ -92,6 +92,107 @@ static void NXTTestInstructionExecution(void)
     [memory release];
 }
 
+static void NXTTestMachineROMAliases(void)
+{
+    NXTMachine *machine;
+    NSString *path;
+    NSMutableData *rom;
+    NXTUInt8 *bytes;
+    NXTUInt32 low;
+    NXTUInt32 high;
+
+    machine = [[NXTMachine alloc] initWithModel:NXTMachineModelNeXTcube
+                                        ramSize:16U * 1024U * 1024U];
+    rom = [NSMutableData dataWithLength:128U * 1024U];
+    bytes = (NXTUInt8 *)[rom mutableBytes];
+    bytes[0] = 0x04; bytes[1] = 0x00; bytes[2] = 0x10; bytes[3] = 0x00;
+    bytes[4] = 0x01; bytes[5] = 0x00; bytes[6] = 0x00; bytes[7] = 0x08;
+    path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"nextemu-test.rom"];
+    [rom writeToFile:path atomically:YES];
+    NXTAssert([machine loadROMAtPath:path error:NULL], "loads a machine ROM");
+    NXTAssert([[machine memory] readLong:&low atAddress:0] == NXTMemoryResultOK,
+              "maps ROM at the reset address");
+    NXTAssert([[machine memory] readLong:&high atAddress:0x01000000] == NXTMemoryResultOK,
+              "maps ROM at its runtime address");
+    NXTAssert(low == high && low == 0x04001000, "ROM aliases contain identical data");
+    NXTAssert([machine reset] && [[machine processor] programCounter] == 0x01000008,
+              "resets into the high ROM alias");
+    [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+    [machine release];
+}
+
+static void NXTTestEffectiveAddresses(void)
+{
+    NXTMemory *memory;
+    NXTMemoryRegion *image;
+    NXTMemoryRegion *ram;
+    NXTMC68040 *processor;
+    NXTUInt32 stored;
+    NXTUInt8 vectors[8] = { 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x01, 0x00 };
+    NXTUInt8 code[22] = {
+        0x20, 0x7c, 0x00, 0x00, 0x10, 0x00, /* MOVEA.L #$1000,A0 */
+        0x20, 0xbc, 0x12, 0x34, 0x56, 0x78, /* MOVE.L #value,(A0) */
+        0x22, 0x10,                         /* MOVE.L (A0),D1 */
+        0x52, 0x98,                         /* ADDQ.L #1,(A0)+ */
+        0x43, 0xe8, 0xff, 0xfc,             /* LEA -4(A0),A1 */
+        0x4e, 0x72                          /* STOP (extension is zero-filled) */
+    };
+
+    memory = [[NXTMemory alloc] init];
+    image = [[NXTMemoryRegion alloc] initWithBaseAddress:0 length:0x200 readOnly:YES];
+    ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000 length:0x100 readOnly:NO];
+    [memory addRegion:image];
+    [memory addRegion:ram];
+    [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+    [memory loadData:[NSData dataWithBytes:code length:22] atAddress:0x100];
+    processor = [[NXTMC68040 alloc] initWithMemory:memory];
+    NXTAssert([processor reset], "resets effective-address test processor");
+    NXTAssert([processor runForInstructionCount:20] == NXTProcessorResultStopped,
+              "runs generalized effective-address instructions");
+    [memory readLong:&stored atAddress:0x1000];
+    NXTAssert(stored == 0x12345679, "updates a memory effective address");
+    NXTAssert([processor dataRegister:1] == 0x12345678, "moves memory into a register");
+    NXTAssert([processor addressRegister:0] == 0x1004, "postincrements once on read-modify-write");
+    NXTAssert([processor addressRegister:1] == 0x1000, "computes displacement effective address");
+    [processor release];
+    [ram release];
+    [image release];
+    [memory release];
+}
+
+static void NXTTestExtendedBranches(void)
+{
+    NXTMemory *memory;
+    NXTMemoryRegion *image;
+    NXTMemoryRegion *stack;
+    NXTMC68040 *processor;
+    NXTUInt8 vectors[8] = { 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00 };
+    NXTUInt8 code[24] = {
+        0x60, 0x00, 0x00, 0x04, /* BRA.W, relative to extension address */
+        0xff, 0xff, 0x70, 0x01,
+        0x60, 0xff, 0x00, 0x00, 0x00, 0x08, /* BRA.L */
+        0xff, 0xff, 0xff, 0xff, 0x72, 0x02,
+        0x4e, 0x72, 0x27, 0x00
+    };
+    memory = [[NXTMemory alloc] init];
+    image = [[NXTMemoryRegion alloc] initWithBaseAddress:0 length:0x200 readOnly:YES];
+    stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1f00 length:0x100 readOnly:NO];
+    [memory addRegion:image];
+    [memory addRegion:stack];
+    [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+    [memory loadData:[NSData dataWithBytes:code length:24] atAddress:0x100];
+    processor = [[NXTMC68040 alloc] initWithMemory:memory];
+    NXTAssert([processor reset], "resets extended-branch test processor");
+    NXTAssert([processor runForInstructionCount:10] == NXTProcessorResultStopped,
+              "bases word and long branches at the extension address");
+    NXTAssert([processor dataRegister:0] == 1 && [processor dataRegister:1] == 2,
+              "extended branches land on instruction boundaries");
+    [processor release];
+    [stack release];
+    [image release];
+    [memory release];
+}
+
 int main(void)
 {
     NSAutoreleasePool *pool;
@@ -99,6 +200,9 @@ int main(void)
     NXTTestMemory();
     NXTTestResetVectors();
     NXTTestInstructionExecution();
+    NXTTestMachineROMAliases();
+    NXTTestEffectiveAddresses();
+    NXTTestExtendedBranches();
     if (failures == 0) printf("All core tests passed.\n");
     [pool drain];
     return failures == 0 ? 0 : 1;

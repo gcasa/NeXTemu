@@ -26,6 +26,18 @@
 @interface NXTMemory : NSObject
 {
     NSMutableArray *_regions;
+    NXTUInt32 _eventCounter;
+    NXTUInt32 _eventLatch;
+    NXTUInt32 _scr2Value;
+    NXTUInt8 _rtcRegisters[64];
+    NXTUInt8 _rtcShiftIn;
+    NXTUInt8 _rtcShiftOut;
+    NXTUInt8 _rtcAddress;
+    unsigned int _rtcPhase;
+    unsigned int _rtcBitCount;
+    BOOL _rtcIsWrite;
+    BOOL _rtcDataBit;
+    BOOL _rtcPreviousClock;
 }
 
 - (BOOL)addRegion:(NXTMemoryRegion *)region;
@@ -38,6 +50,7 @@
 - (NXTMemoryResult)writeWord:(NXTUInt16)value atAddress:(NXTUInt32)address;
 - (NXTMemoryResult)writeLong:(NXTUInt32)value atAddress:(NXTUInt32)address;
 - (NXTMemoryResult)loadData:(NSData *)data atAddress:(NXTUInt32)address;
+- (void)resetNeXTDevicesForTurbo:(BOOL)turbo;
 
 @end
 

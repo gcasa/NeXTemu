@@ -1,15 +1,83 @@
 #import "NXTAppDelegate.h"
 
 @interface NXTDisplayView : NSView
+{
+    NXTMemory *_memory;
+}
+- (void)setMemory:(NXTMemory *)memory;
 @end
 
 @implementation NXTDisplayView
 
+- (void)dealloc
+{
+    [_memory release];
+    [super dealloc];
+}
+
+- (void)setMemory:(NXTMemory *)memory
+{
+    if (_memory == memory) return;
+    [memory retain];
+    [_memory release];
+    _memory = memory;
+    [self setNeedsDisplay:YES];
+}
+
 - (void)drawRect:(NSRect)dirtyRect
 {
+    NXTMemoryRegion *framebuffer;
+    NSBitmapImageRep *bitmap;
+    NXTUInt8 *source;
+    unsigned char *destination;
+    unsigned int x;
+    unsigned int y;
+    unsigned int pixel;
+    unsigned int shade;
+    unsigned int sourceIndex;
+    BOOL hasVideo;
+    NSDictionary *attributes;
+    unsigned int sourceStride;
     (void)dirtyRect;
     [[NSColor blackColor] set];
     NSRectFill([self bounds]);
+    if (_memory == nil) return;
+    framebuffer = [_memory regionContainingAddress:0x0c000000U length:288U * 832U];
+    if (framebuffer == nil)
+        framebuffer = [_memory regionContainingAddress:0x0b000000U length:288U * 832U];
+    if (framebuffer == nil) return;
+    sourceStride = [framebuffer baseAddress] == 0x0c000000U ? 280U : 288U;
+    source = [framebuffer mutableBytes];
+    hasVideo = NO;
+    for (sourceIndex = 0; sourceIndex < sourceStride * 832U; sourceIndex++) {
+        if (source[sourceIndex] != 0) { hasVideo = YES; break; }
+    }
+    if (!hasVideo) {
+        attributes = [NSDictionary dictionaryWithObjectsAndKeys:
+            [NSColor whiteColor], NSForegroundColorAttributeName,
+            [NSFont boldSystemFontOfSize:20.0], NSFontAttributeName, nil];
+        [@"NeXT firmware is running…" drawAtPoint:NSMakePoint(225, 180)
+                                      withAttributes:attributes];
+        return;
+    }
+    bitmap = [[[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL pixelsWide:1120 pixelsHigh:832
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+        colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:1120 * 4 bitsPerPixel:32]
+        autorelease];
+    if (bitmap == nil) return;
+    destination = [bitmap bitmapData];
+    for (y = 0; y < 832; y++) {
+        for (x = 0; x < 1120; x++) {
+            pixel = (source[y * sourceStride + x / 4] >> (6 - 2 * (x & 3))) & 3;
+            shade = 255 - pixel * 85;
+            destination[(y * 1120 + x) * 4 + 0] = (unsigned char)shade;
+            destination[(y * 1120 + x) * 4 + 1] = (unsigned char)shade;
+            destination[(y * 1120 + x) * 4 + 2] = (unsigned char)shade;
+            destination[(y * 1120 + x) * 4 + 3] = 255;
+        }
+    }
+    [bitmap drawInRect:[self bounds]];
 }
 
 @end
@@ -30,6 +98,8 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
 
 - (void)dealloc
 {
+    [_emulationTimer invalidate];
+    [_emulationTimer release];
     [_machine release];
     [_window release];
     [super dealloc];
@@ -133,14 +203,30 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
 
     [_window center];
     [_window makeKeyAndOrderFront:self];
+    _emulationTimer = [[NSTimer scheduledTimerWithTimeInterval:0.02
+                                                       target:self
+                                                     selector:@selector(emulationTick:)
+                                                     userInfo:nil
+                                                      repeats:YES] retain];
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
 {
+    NSString *romsPath;
+    NSArray *files;
+    NSUInteger index;
+    NSString *candidate;
     (void)notification;
     [self buildMenu];
     [self buildWindow];
     [NSApp activateIgnoringOtherApps:YES];
+    romsPath = [[NSBundle mainBundle] pathForResource:@"roms" ofType:nil];
+    files = romsPath == nil ? nil : [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:romsPath error:NULL];
+    for (index = 0; index < [files count]; index++) {
+        candidate = [romsPath stringByAppendingPathComponent:[files objectAtIndex:index]];
+        if ([self loadROMAtPath:candidate showErrors:NO]) break;
+    }
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)application
@@ -154,9 +240,6 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     NSOpenPanel *panel;
     NSInteger response;
     NSString *path;
-    NSString *errorMessage;
-    NXTMachineModel model;
-    NXTMachine *newMachine;
 
     (void)sender;
     panel = [NSOpenPanel openPanel];
@@ -166,28 +249,42 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     response = [panel runModal];
     if (response != NSOKButton) return;
     path = [panel filename];
+    [self loadROMAtPath:path showErrors:YES];
+}
+
+- (BOOL)loadROMAtPath:(NSString *)path showErrors:(BOOL)showErrors
+{
+    NSString *errorMessage;
+    NXTMachineModel model;
+    NXTMachine *newMachine;
+
+    if ([[[path lastPathComponent] lowercaseString] rangeOfString:@"v74"].location != NSNotFound ||
+        [[[path lastPathComponent] lowercaseString] rangeOfString:@"v72"].location != NSNotFound ||
+        [[[path lastPathComponent] lowercaseString] rangeOfString:@"rev_3"].location != NSNotFound)
+        [_modelButton selectItemAtIndex:1];
     model = [_modelButton indexOfSelectedItem] == 0
         ? NXTMachineModelNeXTcube : NXTMachineModelNeXTcubeTurbo;
     newMachine = [[NXTMachine alloc] initWithModel:model
-                                           ramSize:16U * 1024U * 1024U];
+                                           ramSize:(model == NXTMachineModelNeXTcubeTurbo
+                                               ? 128U : 16U) * 1024U * 1024U];
     errorMessage = nil;
     if (newMachine == nil || ![newMachine loadROMAtPath:path error:&errorMessage]) {
         if (errorMessage == nil) errorMessage = @"Unable to create the emulated machine";
-        NSRunAlertPanel(@"Cannot Open ROM", @"%@", @"OK", nil, nil, errorMessage);
+        if (showErrors)
+            NSRunAlertPanel(@"Cannot Open ROM", @"%@", @"OK", nil, nil, errorMessage);
         [newMachine release];
-        return;
+        return NO;
     }
     [_machine release];
     _machine = newMachine;
+    [(NXTDisplayView *)_displayView setMemory:[_machine memory]];
     [_romField setStringValue:path];
     [self resetMachine:self];
+    return YES;
 }
 
 - (void)resetMachine:(id)sender
 {
-    NSString *registers;
-    NSString *status;
-    NXTProcessorResult result;
     (void)sender;
     if (_machine == nil) {
         NSBeep();
@@ -198,11 +295,24 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         [_statusField setStringValue:@"Reset failed: ROM vectors could not be read"];
         return;
     }
+    [_statusField setStringValue:@"Running firmware…"];
+    [_registerField setStringValue:@"SSP: 04000400    PC: 0100001e"];
+    [_displayView setNeedsDisplay:YES];
+}
+
+- (void)emulationTick:(NSTimer *)timer
+{
+    NSString *registers;
+    NSString *status;
+    NXTProcessorResult result;
+    (void)timer;
+    if (_machine == nil || [[_machine processor] isStopped]) return;
     result = [_machine runForInstructionCount:100000];
     if (result == NXTProcessorResultStopped) {
         status = @"Processor stopped normally";
     } else if (result == NXTProcessorResultInstructionLimit) {
-        status = @"Running paused after 100,000 instructions";
+        status = [NSString stringWithFormat:@"Running — %llu instructions",
+            (unsigned long long)[[_machine processor] instructionsExecuted]];
     } else if (result == NXTProcessorResultBusError) {
         status = @"Processor halted on an unmapped memory access";
     } else {
@@ -215,6 +325,8 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         (unsigned int)[[_machine processor] addressRegister:7],
         (unsigned int)[[_machine processor] programCounter]];
     [_registerField setStringValue:registers];
+    _displayTicks++;
+    if ((_displayTicks % 5) == 0) [_displayView setNeedsDisplay:YES];
 }
 
 - (void)showAboutPanel:(id)sender

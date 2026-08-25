@@ -2,6 +2,8 @@ SHELL := /bin/sh
 
 UNAME_S := $(shell uname -s)
 BUILD_DIR := build
+ROMS_DIR := roms
+ROM_FILES := $(wildcard $(ROMS_DIR)/*)
 CORE_SOURCES := \
 	Sources/NeXTemuCore/NXTMemory.m \
 	Sources/NeXTemuCore/NXTMC68040.m \
@@ -41,14 +43,22 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 ifeq ($(UNAME_S),Darwin)
-$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist | $(BUILD_DIR)
+$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FILES) | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/NeXTemu.app/Contents/MacOS $(BUILD_DIR)/NeXTemu.app/Contents/Resources
 	cp Resources/Info.plist $(BUILD_DIR)/NeXTemu.app/Contents/Info.plist
+	@if [ -d "$(ROMS_DIR)" ]; then \
+		rm -rf $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \
+		cp -R $(ROMS_DIR) $(BUILD_DIR)/NeXTemu.app/Contents/Resources/roms; \
+	fi
 	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
 else
-$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist | $(BUILD_DIR)
+$(APP_EXECUTABLE): $(CORE_SOURCES) $(APP_SOURCES) Resources/Info.plist $(ROM_FILES) | $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)/NeXTemu.app/Resources
 	cp Resources/Info.plist $(BUILD_DIR)/NeXTemu.app/Resources/Info-gnustep.plist
+	@if [ -d "$(ROMS_DIR)" ]; then \
+		rm -rf $(BUILD_DIR)/NeXTemu.app/Resources/roms; \
+		cp -R $(ROMS_DIR) $(BUILD_DIR)/NeXTemu.app/Resources/roms; \
+	fi
 	$(CC) $(CPPFLAGS) $(OBJCFLAGS) $(CORE_SOURCES) $(APP_SOURCES) $(GUI_LIBS) -o $@
 endif
 
