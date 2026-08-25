@@ -61,6 +61,12 @@
     BOOL _sccReceiveAvailable[2];
     NXTUInt32 _interruptStatus;
     NXTUInt32 _interruptMask;
+    unsigned int _scsiInterruptDelay;
+    BOOL _verboseBoot;
+    NXTUInt16 _hardclockStaging;
+    NXTUInt16 _hardclockReload;
+    NXTUInt8 _hardclockCSR;
+    unsigned int _hardclockTicks;
 }
 
 - (BOOL)addRegion:(NXTMemoryRegion *)region;
@@ -74,6 +80,8 @@
 - (NXTMemoryResult)writeLong:(NXTUInt32)value atAddress:(NXTUInt32)address;
 - (NXTMemoryResult)loadData:(NSData *)data atAddress:(NXTUInt32)address;
 - (void)resetNeXTDevicesForTurbo:(BOOL)turbo;
+- (void)setVerboseBoot:(BOOL)verbose;
+- (unsigned int)pendingInterruptLevel;
 - (BOOL)attachSCSIDiskAtPath:(NSString *)path error:(NSString **)errorMessage;
 
 @end

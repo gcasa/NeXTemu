@@ -10,6 +10,10 @@
 
 #define NXT_ESP_BASE 0x02014000U
 #define NXT_DMA_CSR  0x02000010U
+#define NXT_INTR_SCSI (1U << 12)
+#define NXT_INTR_DISK (1U << 13)
+#define NXT_INTR_SCSI_DMA (1U << 26)
+#define NXT_INTR_TIMER (1U << 29)
 
 static NXTUInt32 NXTCanonicalIOAddress(NXTUInt32 address)
 {
@@ -37,6 +41,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     static NXTUInt8 seenRead[0x30000];
     static NXTUInt8 seenWrite[0x30000];
     NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+    if (canonical == 0x02010000U) { *value = 0; return NXTMemoryResultOK; }
+    if (canonical == 0x02018004U) { *value = 0; return NXTMemoryResultOK; }
     NXTUInt32 slot;
     NXTUInt8 *seen;
     if (canonical < 0x02000000U || canonical >= 0x02300000U) return;
@@ -168,8 +174,13 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     if (count > sizeof(cdb)) count = sizeof(cdb);
     if (count != 0) memcpy(cdb, _espFIFO + start, count);
     _espFIFOCount = 0;
-    if (_scsiFile == nil || (_espRegisters[4] & 7) != 6) {
+    /* The monitor's default `sd(0,0,0)` boot selects SCSI target 0.  Register
+       4 is the destination ID when written (and the status register when
+       read), so do not confuse it with the controller's own ID. */
+    if (_scsiFile == nil || (_espRegisters[4] & 7) != 0) {
         _espInterrupt = 0x20;
+        _interruptStatus |= NXT_INTR_SCSI;
+        _scsiInterruptDelay = 10;
         _scsiPhase = 3;
         return;
     }
@@ -242,6 +253,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     (void)bytes;
     _espRegisters[6] = 4;
     _espInterrupt = 0x18;
+    _interruptStatus |= NXT_INTR_SCSI;
+    _scsiInterruptDelay = 10;
 }
 
 - (void)performSCSIDMA
@@ -269,6 +282,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     _espRegisters[0] = (NXTUInt8)requested; _espRegisters[1] = (NXTUInt8)(requested >> 8);
     _dmaState = 0x08;
     _espInterrupt = 0x08;
+    _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK | NXT_INTR_SCSI_DMA;
+    _scsiInterruptDelay = 0; /* DMA completion is sampled immediately. */
 }
 
 - (void)resetNeXTDevicesForTurbo:(BOOL)turbo
@@ -289,6 +304,11 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     _rtcRegisters[17] = 0x80; /* MCS1850 clock */
     _rtcRegisters[18] = 's';
     _rtcRegisters[19] = 'd';
+    if (_verboseBoot) {
+        _rtcRegisters[20] = ' ';
+        _rtcRegisters[21] = '-';
+        _rtcRegisters[22] = 'v';
+    }
     _rtcRegisters[30] = 0;
     _rtcRegisters[31] = 0;
     _rtcSeconds = 1704067200U;
@@ -313,7 +333,42 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     memset(_sccReceiveAvailable, 0, sizeof(_sccReceiveAvailable));
     _interruptStatus = 0;
     _interruptMask = 0;
+    _scsiInterruptDelay = 0;
+    _hardclockStaging = 0;
+    _hardclockReload = 0;
+    _hardclockCSR = 0;
+    _hardclockTicks = 0;
     [self resetSCSI];
+}
+
+- (void)setVerboseBoot:(BOOL)verbose
+{
+    _verboseBoot = verbose;
+}
+
+- (unsigned int)pendingInterruptLevel
+{
+    NXTUInt32 pending = _interruptStatus & _interruptMask;
+    unsigned int hardclockInterval = (unsigned int)_hardclockReload * 8U;
+    if (hardclockInterval < 5000U) hardclockInterval = 5000U;
+    if ((_hardclockCSR & 0x80U) != 0 && _hardclockReload != 0 &&
+        (_interruptMask & 0x0000000fU) != 0 &&
+        ++_hardclockTicks >= hardclockInterval) {
+        _hardclockTicks = 0;
+        _interruptStatus |= NXT_INTR_TIMER;
+        pending = _interruptStatus & _interruptMask;
+    }
+    if (_scsiInterruptDelay != 0) {
+        _scsiInterruptDelay--;
+        pending &= ~(NXT_INTR_SCSI | NXT_INTR_DISK);
+    }
+    if (pending & 0xfc7c0000U) return 6;
+    if (pending & 0x00038000U) return 5;
+    if (pending & 0x00004000U) return 4;
+    if (pending & 0x00003ffcU) return 3;
+    if (pending & 0x00000002U) return 2;
+    if (pending & 0x00000001U) return 1;
+    return 0;
 }
 
 - (NXTUInt8)rtcRegisterValue:(NXTUInt8)address
@@ -459,6 +514,10 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     NXTTraceMMIO(address, NO, 1);
     canonical = address & 0x7fffffffU;
     if ((canonical & 0xfff00000U) == 0x02100000U) canonical -= 0x00100000U;
+    if (canonical >= 0x02014100U && canonical <= 0x02014108U) {
+        *value = canonical == 0x02014104U ? 0x80U : 0;
+        return NXTMemoryResultOK;
+    }
     if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U) {
         unsigned int reg = canonical - NXT_ESP_BASE;
         if (reg == 2) {
@@ -471,6 +530,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
                      ((_espRegisters[0] == 0 && _espRegisters[1] == 0) ? 0x10U : 0));
         } else if (reg == 5) {
             *value = _espInterrupt; _espInterrupt = 0;
+            _interruptStatus &= ~(NXT_INTR_SCSI | NXT_INTR_DISK);
+            _scsiInterruptDelay = 0;
         } else if (reg == 7) *value = (NXTUInt8)_espFIFOCount;
         else *value = _espRegisters[reg];
 #ifdef NXT_TRACE_SCSI
@@ -531,7 +592,8 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
         return NXTMemoryResultOK;
     }
     if (canonical == 0x02016004U) {
-        *value = 0;
+        *value = (_interruptMask & 0x0000000fU) != 0 ? _hardclockCSR : 0;
+        _interruptStatus &= ~NXT_INTR_TIMER;
         return NXTMemoryResultOK;
     }
     region = [self regionContainingAddress:address length:1];
@@ -620,6 +682,10 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     NXTMemoryRegion *region;
     NXTTraceMMIO(address, YES, 1);
     NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+    if (canonical == 0x02010000U) return NXTMemoryResultOK;
+    if (canonical == 0x02018004U) return NXTMemoryResultOK;
+    if (canonical >= 0x02014100U && canonical <= 0x02014108U)
+        return NXTMemoryResultOK;
     if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U) {
         unsigned int reg = canonical - NXT_ESP_BASE;
 #ifdef NXT_TRACE_SCSI
@@ -636,10 +702,31 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
                 if (value & 0x80U) [self performSCSIDMA];
                 else if (_scsiPhase == 1 && _scsiDataOffset < [_scsiData length]) {
                     _espFIFO[0] = ((const NXTUInt8 *)[_scsiData bytes])[_scsiDataOffset++]; _espFIFOCount = 1; _espInterrupt = 8;
+                    _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+                    _scsiInterruptDelay = 10;
                 }
             } else if (command == 0x11) {
                 _espFIFO[0] = _scsiStatus; _espFIFO[1] = 0; _espFIFOCount = 2; _scsiPhase = 7; _espInterrupt = 8;
-            } else if (command == 0x12) { _scsiPhase = 3; _espInterrupt = 0x10; }
+                _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+                _scsiInterruptDelay = 10;
+            } else if (command == 0x12) {
+                _scsiPhase = 3; _espInterrupt = 0x10;
+                _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+                _scsiInterruptDelay = 10;
+            } else if (command == 0x18) { /* Transfer pad */
+                NXTUInt32 pad = (NXTUInt32)_espRegisters[0] |
+                                ((NXTUInt32)_espRegisters[1] << 8);
+                NXTUInt32 available = _scsiData == nil ? 0 :
+                    (NXTUInt32)([_scsiData length] - _scsiDataOffset);
+                if (pad == 0) pad = 65536U;
+                if (pad > available) pad = available;
+                _scsiDataOffset += pad;
+                _espRegisters[0] = 0; _espRegisters[1] = 0;
+                if (_scsiDataOffset >= [_scsiData length]) _scsiPhase = 3;
+                _espInterrupt = 0x08;
+                _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+                _scsiInterruptDelay = 10;
+            }
             _espRegisters[3] = value;
         } else _espRegisters[reg] = value;
         return NXTMemoryResultOK;
@@ -679,13 +766,25 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     }
     if (canonical == 0x02016000U) {
         _eventCounter = (_eventCounter & 0xffff00ffU) | ((NXTUInt32)value << 8);
+        _hardclockStaging = (NXTUInt16)((_hardclockStaging & 0x00ffU) |
+                                       ((NXTUInt16)value << 8));
         return NXTMemoryResultOK;
     }
     if (canonical == 0x02016001U) {
         _eventCounter = (_eventCounter & 0xffffff00U) | value;
+        _hardclockStaging = (NXTUInt16)((_hardclockStaging & 0xff00U) | value);
         return NXTMemoryResultOK;
     }
-    if (canonical == 0x02016004U) return NXTMemoryResultOK;
+    if (canonical == 0x02016004U) {
+        _hardclockCSR = value;
+        if ((value & 0x40U) != 0) {
+            _hardclockReload = _hardclockStaging;
+            _hardclockCSR &= (NXTUInt8)~0x40U;
+        }
+        _interruptStatus &= ~NXT_INTR_TIMER;
+        _hardclockTicks = 0;
+        return NXTMemoryResultOK;
+    }
     if (canonical >= 0x02006000U && canonical < 0x02006010U) {
         unsigned int reg = canonical - 0x02006000U;
         if (reg == 0) _enetRegisters[0] &= (NXTUInt8)~value;
@@ -731,10 +830,16 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
 #endif
         int dmaChannel = NXTDMAChannelForAddress(canonical);
         if (canonical == NXT_DMA_CSR) {
-            if (value & 0x00100000U) _dmaState &= ~(0x0bU);
+            if (value & 0x00100000U) {
+                _dmaState &= ~(0x0bU);
+                _interruptStatus &= ~NXT_INTR_SCSI_DMA;
+            }
             if (value & 0x00010000U) _dmaState |= 1U;
             if (value & 0x00020000U) _dmaState |= 2U;
-            if (value & 0x00080000U) _dmaState &= ~8U;
+            if (value & 0x00080000U) {
+                _dmaState &= ~8U;
+                _interruptStatus &= ~NXT_INTR_SCSI_DMA;
+            }
             return NXTMemoryResultOK;
         }
         if (dmaChannel > 0) {

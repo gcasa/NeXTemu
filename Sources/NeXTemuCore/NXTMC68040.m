@@ -110,6 +110,19 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     return [_memory writeLong:value atAddress:_addressRegisters[7]] == NXTMemoryResultOK;
 }
 
+- (BOOL)pushWord:(NXTUInt16)value
+{
+    _addressRegisters[7] -= 2;
+    return [_memory writeWord:value atAddress:_addressRegisters[7]] == NXTMemoryResultOK;
+}
+
+- (BOOL)popWord:(NXTUInt16 *)value
+{
+    if ([_memory readWord:value atAddress:_addressRegisters[7]] != NXTMemoryResultOK) return NO;
+    _addressRegisters[7] += 2;
+    return YES;
+}
+
 - (BOOL)popLong:(NXTUInt32 *)value
 {
     if ([_memory readLong:value atAddress:_addressRegisters[7]] != NXTMemoryResultOK) return NO;
@@ -396,7 +409,79 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     unsigned int remainderRegister;
     NXTUInt64 wideDividend;
     NXTUInt64 wideResult;
+    unsigned int interruptLevel;
 
+    /* NeXT's early kernel checksums the entire physical RAM with a tight
+       MOVE.W/ADD.L/DBF loop.  Interpreting four instructions per word makes
+       a 128 MiB machine appear hung for minutes.  Recognize that exact loop
+       and preserve its architectural result with one native pass. */
+    if (_programCounter == 0x040910f4U) {
+        static const NXTUInt8 checksumLoop[16] = {
+            0x30,0x18,0x34,0x00,0xd6,0x82,0x51,0xc9,
+            0xff,0xf8,0x42,0x41,0x53,0x81,0x64,0xf0
+        };
+        NXTUInt8 actual[16];
+        unsigned int signatureIndex;
+        BOOL matches = YES;
+        NXTUInt64 wordCount = (NXTUInt64)_dataRegisters[1] + 1U;
+        NXTUInt64 byteCount = wordCount * 2U;
+        NXTMemoryRegion *ram;
+        for (signatureIndex = 0; signatureIndex < sizeof(actual); signatureIndex++) {
+            if ([_memory readByte:&actual[signatureIndex]
+                        atAddress:_programCounter + signatureIndex] != NXTMemoryResultOK ||
+                actual[signatureIndex] != checksumLoop[signatureIndex]) {
+                matches = NO;
+                break;
+            }
+        }
+        ram = matches && byteCount <= 0xffffffffU
+            ? [_memory regionContainingAddress:_addressRegisters[0]
+                                          length:(NXTUInt32)byteCount] : nil;
+        if (ram != nil && wordCount != 0) {
+            const NXTUInt8 *bytes = [ram mutableBytes] +
+                _addressRegisters[0] - [ram baseAddress];
+            NXTUInt32 sum = 0, lastWord = 0;
+            NXTUInt64 word;
+            for (word = 0; word < wordCount; word++) {
+                lastWord = ((NXTUInt32)bytes[word * 2U] << 8) |
+                            bytes[word * 2U + 1U];
+                sum += lastWord;
+            }
+            _addressRegisters[0] += (NXTUInt32)byteCount;
+            _dataRegisters[0] = (_dataRegisters[0] & 0xffff0000U) | lastWord;
+            _dataRegisters[2] = lastWord;
+            _dataRegisters[3] += sum;
+            _dataRegisters[1] = 0xffffffffU;
+            _statusRegister = (NXTUInt16)((_statusRegister & ~0x000fU) |
+                                          NXT_SR_X | NXT_SR_N | NXT_SR_C);
+            _programCounter = 0x04091106U;
+        }
+    }
+
+    interruptLevel = [_memory pendingInterruptLevel];
+    if (interruptLevel > ((_statusRegister >> 8) & 7U)) {
+        NXTUInt16 savedStatus = _statusRegister;
+        NXTUInt32 handler;
+        NXTUInt16 frame = (NXTUInt16)((24U + interruptLevel) * 4U);
+        if ((_statusRegister & 0x2000U) == 0) {
+            _userStackPointer = _addressRegisters[7];
+            _addressRegisters[7] = _interruptStackPointer;
+        } else if ((_statusRegister & 0x1000U) != 0) {
+            _masterStackPointer = _addressRegisters[7];
+            _addressRegisters[7] = _interruptStackPointer;
+        }
+        _statusRegister = (NXTUInt16)((_statusRegister & ~0x1700U) |
+                                      0x2000U | (interruptLevel << 8));
+        _stopped = NO;
+        if (![self pushWord:frame] || ![self pushLong:_programCounter] ||
+            ![self pushWord:savedStatus] ||
+            [_memory readLong:&handler
+                    atAddress:_vectorBaseRegister + (24U + interruptLevel) * 4U]
+                != NXTMemoryResultOK)
+            return [self fail:NXTProcessorResultBusError];
+        _interruptStackPointer = _addressRegisters[7];
+        _programCounter = handler;
+    }
     if (_stopped) return _lastResult == NXTProcessorResultOK
         ? NXTProcessorResultStopped : _lastResult;
     _lastOpcodeAddress = _programCounter;
@@ -450,6 +535,28 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
             _addressRegisters[7] = fpAddress;
         }
         return NXTProcessorResultOK;
+    }
+    if (!(_lastOpcodeAddress >= 0x01005e20U && _lastOpcodeAddress < 0x01005e98U) &&
+        (opcode & 0xffc0U) == 0xf200U && opcode != 0xf203 && opcode != 0xf204 &&
+        opcode != 0xf21f && opcode != 0xf227) {
+        unsigned int fpRegister;
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        fpRegister = (extension >> 7) & 7U;
+        sourceMode = (opcode >> 3) & 7U;
+        sourceRegister = opcode & 7U;
+        if ((extension & 0x7c00U) == 0x4000U) { /* FMOVE.L <ea>,FPn */
+            if (![self readEA:&value mode:sourceMode register:sourceRegister size:4])
+                return [self fail:NXTProcessorResultBusError];
+            _fpValues[fpRegister] = (double)(int32_t)value;
+            return NXTProcessorResultOK;
+        }
+        if ((extension & 0x7c00U) == 0x6000U) { /* FMOVE.L FPn,<ea> */
+            value = (NXTUInt32)(int32_t)_fpValues[fpRegister];
+            if (![self writeEA:value mode:sourceMode register:sourceRegister size:4])
+                return [self fail:NXTProcessorResultBusError];
+            return NXTProcessorResultOK;
+        }
+        return [self fail:NXTProcessorResultIllegalInstruction];
     }
     if (opcode == 0xf203 || opcode == 0xf204 ||
         opcode == 0xf21f || opcode == 0xf227) {
@@ -650,6 +757,22 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         return NXTProcessorResultOK;
     }
     if ((opcode & 0xfe00) == 0xf400) return NXTProcessorResultOK; /* CINV/CPUSH */
+    if ((opcode & 0xffc0) == 0xf300 || (opcode & 0xffc0) == 0xf340) {
+        /* 68040 FSAVE/FRESTORE.  An idle integrated FPU has only the
+           four-byte version/null frame; the arithmetic register state is
+           transferred separately with FMOVEM by the surrounding code. */
+        sourceMode = (opcode >> 3) & 7;
+        sourceRegister = opcode & 7;
+        if (![self effectiveAddress:&address mode:sourceMode register:sourceRegister
+                                size:4 writing:(opcode & 0x0040U) == 0])
+            return [self fail:NXTProcessorResultBusError];
+        if ((opcode & 0x0040U) == 0) {
+            if ([_memory writeLong:0x41000000U atAddress:address] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+        } else if ([_memory readLong:&value atAddress:address] != NXTMemoryResultOK)
+            return [self fail:NXTProcessorResultBusError];
+        return NXTProcessorResultOK;
+    }
     if ((opcode & 0xfff8) == 0xf620) { /* MOVE16 (An)+,(Am)+ */
         if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
         sourceRegister = opcode & 7;
@@ -680,6 +803,21 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     if (opcode == 0x4e75) { /* RTS */
         if (![self popLong:&value]) return [self fail:NXTProcessorResultBusError];
         _programCounter = value;
+        return NXTProcessorResultOK;
+    }
+    if (opcode == 0x4e73) { /* RTE, format-0 exception frame */
+        NXTUInt16 restoredStatus, frame;
+        if (![self popWord:&restoredStatus] || ![self popLong:&value] ||
+            ![self popWord:&frame])
+            return [self fail:NXTProcessorResultBusError];
+        (void)frame;
+        _interruptStackPointer = _addressRegisters[7];
+        _programCounter = value;
+        _statusRegister = restoredStatus;
+        if ((restoredStatus & 0x2000U) == 0)
+            _addressRegisters[7] = _userStackPointer;
+        else if ((restoredStatus & 0x1000U) != 0)
+            _addressRegisters[7] = _masterStackPointer;
         return NXTProcessorResultOK;
     }
     if ((opcode & 0xfff8) == 0x4e50) { /* LINK.W An,#disp */
@@ -886,6 +1024,14 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
             displacement = (int8_t)byteDisplacement;
         }
         returnAddress = _programCounter;
+        /* The kernel hardclock path depends on unsigned BHI immediately
+           following CMPA.  Keep the decision tied directly to C/Z so an
+           interrupt-level SR cannot be mistaken for condition flags. */
+        if (condition == 2) {
+            if ((_statusRegister & (NXT_SR_C | NXT_SR_Z)) == 0)
+                _programCounter = (NXTUInt32)(branchBase + displacement);
+            return NXTProcessorResultOK;
+        }
         if (condition == 1) {
             if (![self pushLong:returnAddress]) return [self fail:NXTProcessorResultBusError];
             _programCounter = (NXTUInt32)(branchBase + displacement);
@@ -927,9 +1073,18 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         registerIndex = opcode & 7;
         quickValue = (opcode >> 9) & 7;
         if (quickValue == 0) quickValue = 8;
-        if ((opcode & 0x0100) != 0) _dataRegisters[registerIndex] -= quickValue;
-        else _dataRegisters[registerIndex] += quickValue;
-        [self setNZForLong:_dataRegisters[registerIndex]];
+        sourceValue = _dataRegisters[registerIndex];
+        if ((opcode & 0x0100) != 0) {
+            _dataRegisters[registerIndex] -= quickValue;
+            [self setSubFlagsWithDestination:sourceValue source:quickValue
+                                      result:_dataRegisters[registerIndex] size:4];
+        } else {
+            _dataRegisters[registerIndex] += quickValue;
+            [self setAddFlagsWithDestination:sourceValue source:quickValue
+                                      result:_dataRegisters[registerIndex] size:4];
+        }
+        if ((_statusRegister & NXT_SR_C) != 0) _statusRegister |= NXT_SR_X;
+        else _statusRegister &= (NXTUInt16)~NXT_SR_X;
         return NXTProcessorResultOK;
     }
     if ((opcode & 0xf000) == 0x5000 && ((opcode >> 6) & 3) != 3) { /* ADDQ/SUBQ */
@@ -948,13 +1103,23 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
                 ![self readSized:&value address:address size:size])
                 return [self fail:NXTProcessorResultBusError];
         }
+        sourceValue = value;
         if ((opcode & 0x0100) != 0) value -= quickValue; else value += quickValue;
         if (destinationMode <= 1) {
             if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])
                 return [self fail:NXTProcessorResultBusError];
         } else if (![self writeSized:value address:address size:size])
             return [self fail:NXTProcessorResultBusError];
-        if (destinationMode != 1) [self setNZForValue:value size:size];
+        if (destinationMode != 1) {
+            if ((opcode & 0x0100) != 0)
+                [self setSubFlagsWithDestination:sourceValue source:quickValue
+                                          result:value size:size];
+            else
+                [self setAddFlagsWithDestination:sourceValue source:quickValue
+                                          result:value size:size];
+            if ((_statusRegister & NXT_SR_C) != 0) _statusRegister |= NXT_SR_X;
+            else _statusRegister &= (NXTUInt16)~NXT_SR_X;
+        }
         return NXTProcessorResultOK;
     }
     if ((opcode & 0xfff8) == 0x4280) { /* CLR.L Dn */

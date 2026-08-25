@@ -8,6 +8,9 @@
 {
     NSWindow *_window;
     NSPopUpButton *_modelButton;
+    NSButton *_verboseButton;
+    NSPopUpButton *_framebufferScaleButton;
+    NSScrollView *_displayScrollView;
     NSTextField *_romField;
     NSTextField *_diskField;
     NSTextField *_statusField;
@@ -23,6 +26,8 @@
 - (void)openROM:(id)sender;
 - (void)openDiskImage:(id)sender;
 - (void)resetMachine:(id)sender;
+- (void)toggleVerboseBoot:(id)sender;
+- (void)changeFramebufferScale:(id)sender;
 - (void)showAboutPanel:(id)sender;
 - (BOOL)loadROMAtPath:(NSString *)path showErrors:(BOOL)showErrors;
 - (void)emulationTick:(NSTimer *)timer;

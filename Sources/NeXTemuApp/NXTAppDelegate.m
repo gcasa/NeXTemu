@@ -1,6 +1,8 @@
 #import "NXTAppDelegate.h"
 
 static NSString * const NXTSCSIDiskPathDefaultsKey = @"NXTSCSIDiskImagePath";
+static NSString * const NXTVerboseBootDefaultsKey = @"NXTVerboseBoot";
+static NSString * const NXTFramebufferScaleDefaultsKey = @"NXTFramebufferScale";
 
 @interface NXTDisplayView : NSView
 {
@@ -157,6 +159,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     NSView *contentView;
     NSTextField *titleField;
     NSTextField *modelLabel;
+    NSTextField *scaleLabel;
     NSButton *openButton;
     NSButton *resetButton;
     NSButton *diskButton;
@@ -170,56 +173,98 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [_window setTitle:@"NeXTemu"];
     contentView = [_window contentView];
 
-    titleField = NXTCreateLabel(NSMakeRect(24, 574, 420, 26), @"NeXTcube Emulator");
+    titleField = NXTCreateLabel(NSMakeRect(24, 174, 420, 26), @"NeXTcube Emulator");
     [titleField setFont:[NSFont boldSystemFontOfSize:18.0]];
     [contentView addSubview:titleField];
 
-    modelLabel = NXTCreateLabel(NSMakeRect(24, 538, 60, 24), @"Model:");
+    modelLabel = NXTCreateLabel(NSMakeRect(24, 140, 60, 24), @"Model:");
     [contentView addSubview:modelLabel];
-    _modelButton = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(84, 534, 220, 30)
+    _modelButton = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(84, 136, 220, 30)
                                               pullsDown:NO];
     [_modelButton addItemWithTitle:@"NeXTcube (68040, 25 MHz)"];
     [_modelButton addItemWithTitle:@"NeXTcube Turbo (68040, 33 MHz)"];
     [contentView addSubview:_modelButton];
     [_modelButton release];
 
-    openButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 534, 166, 30)] autorelease];
+    _verboseButton = [[[NSButton alloc] initWithFrame:NSMakeRect(324, 138, 150, 24)] autorelease];
+    [_verboseButton setButtonType:NSSwitchButton];
+    [_verboseButton setTitle:@"Verbose boot (-v)"];
+    [_verboseButton setState:[[NSUserDefaults standardUserDefaults]
+        boolForKey:NXTVerboseBootDefaultsKey] ? NSOnState : NSOffState];
+    [_verboseButton setTarget:self];
+    [_verboseButton setAction:@selector(toggleVerboseBoot:)];
+    [contentView addSubview:_verboseButton];
+
+    openButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 106, 166, 30)] autorelease];
     [openButton setTitle:@"Choose ROM..."];
     [openButton setBezelStyle:NSRoundedBezelStyle];
     [openButton setTarget:self];
     [openButton setAction:@selector(openROM:)];
     [contentView addSubview:openButton];
 
-    _romField = [NXTCreateLabel(NSMakeRect(24, 504, 712, 22), @"No ROM selected") retain];
+    _romField = [NXTCreateLabel(NSMakeRect(24, 110, 530, 22), @"No ROM selected") retain];
     [_romField setLineBreakMode:NSLineBreakByTruncatingMiddle];
     [contentView addSubview:_romField];
 
-    _diskField = [NXTCreateLabel(NSMakeRect(24, 480, 520, 22), @"No SCSI disk attached") retain];
+    _diskField = [NXTCreateLabel(NSMakeRect(24, 80, 350, 22), @"No SCSI disk attached") retain];
     [_diskField setLineBreakMode:NSLineBreakByTruncatingMiddle];
     [contentView addSubview:_diskField];
-    diskButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 480, 166, 30)] autorelease];
+    diskButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 76, 166, 30)] autorelease];
     [diskButton setTitle:@"Attach Disk..."];
     [diskButton setBezelStyle:NSRoundedBezelStyle];
     [diskButton setTarget:self];
     [diskButton setAction:@selector(openDiskImage:)];
     [contentView addSubview:diskButton];
 
-    _displayView = [[NXTDisplayView alloc] initWithFrame:NSMakeRect(24, 96, 712, 368)];
-    [contentView addSubview:_displayView];
-    [_displayView release];
+    scaleLabel = NXTCreateLabel(NSMakeRect(382, 82, 48, 22), @"Scale:");
+    [contentView addSubview:scaleLabel];
+    _framebufferScaleButton = [[NSPopUpButton alloc]
+        initWithFrame:NSMakeRect(428, 78, 126, 30) pullsDown:NO];
+    [_framebufferScaleButton addItemWithTitle:@"100%"];
+    [_framebufferScaleButton addItemWithTitle:@"200%"];
+    [_framebufferScaleButton addItemWithTitle:@"300%"];
+    [_framebufferScaleButton setTarget:self];
+    [_framebufferScaleButton setAction:@selector(changeFramebufferScale:)];
+    [contentView addSubview:_framebufferScaleButton];
+    [_framebufferScaleButton release];
 
-    _statusField = [NXTCreateLabel(NSMakeRect(24, 60, 520, 24), @"Stopped — choose a 128 KiB NeXT ROM image") retain];
+    _displayScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(24, 210, 712, 368)];
+    [_displayScrollView setHasHorizontalScroller:NO];
+    [_displayScrollView setHasVerticalScroller:NO];
+    [_displayScrollView setBorderType:NSNoBorder];
+    _displayView = [[NXTDisplayView alloc] initWithFrame:NSMakeRect(0, 0, 1120, 832)];
+    [_displayScrollView setDocumentView:_displayView];
+    [contentView addSubview:_displayScrollView];
+    [_displayView release];
+    [_displayScrollView release];
+
+    _statusField = [NXTCreateLabel(NSMakeRect(24, 48, 520, 24), @"Stopped — choose a 128 KiB NeXT ROM image") retain];
     [contentView addSubview:_statusField];
-    _registerField = [NXTCreateLabel(NSMakeRect(24, 32, 520, 24), @"SSP: —    PC: —") retain];
+    _registerField = [NXTCreateLabel(NSMakeRect(24, 20, 520, 24), @"SSP: —    PC: —") retain];
     [_registerField setFont:[NSFont userFixedPitchFontOfSize:12.0]];
     [contentView addSubview:_registerField];
 
-    resetButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 42, 166, 32)] autorelease];
+    resetButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 28, 166, 32)] autorelease];
     [resetButton setTitle:@"Reset Machine"];
     [resetButton setBezelStyle:NSRoundedBezelStyle];
     [resetButton setTarget:self];
     [resetButton setAction:@selector(resetMachine:)];
     [contentView addSubview:resetButton];
+
+    {
+        NSView *subview;
+        for (subview in [contentView subviews]) {
+            [subview setAutoresizingMask:NSViewNotSizable];
+        }
+    }
+    {
+        NSInteger savedScale = [[NSUserDefaults standardUserDefaults]
+            integerForKey:NXTFramebufferScaleDefaultsKey];
+        if (savedScale != 200 && savedScale != 300) savedScale = 100;
+        [_framebufferScaleButton selectItemWithTitle:
+            [NSString stringWithFormat:@"%ld%%", (long)savedScale]];
+        [self changeFramebufferScale:_framebufferScaleButton];
+    }
 
     [_window center];
     [_window makeKeyAndOrderFront:self];
@@ -263,7 +308,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
         [_statusField setStringValue:@"SCSI disk attached, but the machine could not reset"];
         return;
     }
-    [_statusField setStringValue:@"SCSI disk attached at target 6 — machine restarted"];
+    [_statusField setStringValue:@"SCSI disk attached at target 0 — machine restarted"];
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
@@ -326,6 +371,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     newMachine = [[NXTMachine alloc] initWithModel:model
                                            ramSize:(model == NXTMachineModelNeXTcubeTurbo
                                                ? 128U : 16U) * 1024U * 1024U];
+    [newMachine setVerboseBoot:[[_verboseButton cell] state] == NSOnState];
     errorMessage = nil;
     if (newMachine == nil || ![newMachine loadROMAtPath:path error:&errorMessage]) {
         if (errorMessage == nil) errorMessage = @"Unable to create the emulated machine";
@@ -370,6 +416,51 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     }
     [_statusField setStringValue:@"Running firmware…"];
     [_registerField setStringValue:@"SSP: 04000400    PC: 0100001e"];
+    [_displayView setNeedsDisplay:YES];
+}
+
+- (void)toggleVerboseBoot:(id)sender
+{
+    BOOL enabled = [sender state] == NSOnState;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled
+                                            forKey:NXTVerboseBootDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    if (_machine != nil) {
+        [_machine setVerboseBoot:enabled];
+        [self resetMachine:sender];
+        [_statusField setStringValue:enabled
+            ? @"Verbose boot enabled — machine restarted"
+            : @"Verbose boot disabled — machine restarted"];
+    }
+}
+
+- (void)changeFramebufferScale:(id)sender
+{
+    NSInteger scale = 100;
+    NSString *title = [sender titleOfSelectedItem];
+    NSSize framebufferSize;
+    NSSize contentSize;
+    NSRect windowFrame;
+    CGFloat oldTop;
+    if ([title hasPrefix:@"200"]) scale = 200;
+    else if ([title hasPrefix:@"300"]) scale = 300;
+    [[NSUserDefaults standardUserDefaults] setInteger:scale
+                                                forKey:NXTFramebufferScaleDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    framebufferSize = NSMakeSize(1120.0 * scale / 100.0,
+                                 832.0 * scale / 100.0);
+    contentSize = NSMakeSize(framebufferSize.width + 48.0,
+                             framebufferSize.height + 234.0);
+    windowFrame = [_window frame];
+    oldTop = NSMaxY(windowFrame);
+    windowFrame.size = [_window frameRectForContentRect:
+        NSMakeRect(0, 0, contentSize.width, contentSize.height)].size;
+    windowFrame.origin.y = oldTop - windowFrame.size.height;
+    [_window setFrame:windowFrame display:YES animate:NO];
+    [_displayScrollView setFrame:NSMakeRect(24, 210,
+                                             framebufferSize.width,
+                                             framebufferSize.height)];
+    [_displayView setFrameSize:framebufferSize];
     [_displayView setNeedsDisplay:YES];
 }
 

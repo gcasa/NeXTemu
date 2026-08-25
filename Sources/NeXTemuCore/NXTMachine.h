@@ -24,6 +24,7 @@ typedef enum {
 - (id)initWithModel:(NXTMachineModel)model ramSize:(NXTUInt32)ramSize;
 - (BOOL)loadROMAtPath:(NSString *)path error:(NSString **)errorMessage;
 - (BOOL)reset;
+- (void)setVerboseBoot:(BOOL)verbose;
 - (BOOL)attachDiskImageAtPath:(NSString *)path error:(NSString **)errorMessage;
 - (NSString *)diskImagePath;
 - (NXTUInt64)diskImageSize;

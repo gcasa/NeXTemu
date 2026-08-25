@@ -59,6 +59,8 @@ static BOOL NXTAddRegisterBank(NXTMemory *memory, NXTUInt32 base, NXTUInt32 leng
             !NXTAddRegisterBank(_memory, 0x0211a000U, 0x00000004U) || /* timer */
             !NXTAddRegisterBank(_memory, 0x02200000U, 0x00010000U) || /* TMC */
             !NXTAddRegisterBank(_memory, 0x02210000U, 0x00010000U) || /* Turbo slot */
+            !NXTAddRegisterBank(_memory, 0x03e00000U, 0x00200000U) || /* low DMA pages */
+            !NXTAddRegisterBank(_memory, 0x10000000U, 0x01000000U) || /* kernel device map */
             !NXTAddRegisterBank(_memory,
                 model == NXTMachineModelNeXTcubeTurbo ? 0x0c000000U : 0x0b000000U,
                 0x001cb100U) || /* display */
@@ -156,6 +158,7 @@ static BOOL NXTAddRegisterBank(NXTMemory *memory, NXTUInt32 base, NXTUInt32 leng
         return NO;
     return [_processor reset];
 }
+- (void)setVerboseBoot:(BOOL)verbose { [_memory setVerboseBoot:verbose]; }
 - (NXTProcessorResult)runForInstructionCount:(NXTUInt32)count
 {
     return [_processor runForInstructionCount:count];
