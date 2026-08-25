@@ -249,7 +249,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (_scsiFile == nil || (_espRegisters[4] & 7) != 0)
     {
       _espInterrupt = 0x20;
-      _interruptStatus |= NXT_INTR_SCSI;
+      _interruptStatus |= NXT_INTR_SCSI_DMA;
       _scsiInterruptDelay = 10;
       _scsiPhase = 3;
       return;
@@ -1234,8 +1234,19 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
             BOOL accepted = YES, broadcast = YES;
             [self readLong:&source atAddress:0x02004118U];
             [self readLong:&sourceLimit atAddress:0x02004114U];
+            source &= 0x7fffffffU;
+            sourceLimit &= 0x7fffffffU;
+            if (source == 0 || sourceLimit <= source)
+              {
+                [self readLong:&source atAddress:0x02004100U];
+                [self readLong:&sourceLimit atAddress:0x02004104U];
+                source &= 0x7fffffffU;
+                sourceLimit &= 0x7fffffffU;
+              }
             [self readLong:&destination atAddress:0x02004150U];
             [self readLong:&destinationLimit atAddress:0x02004154U];
+            destination &= 0x7fffffffU;
+            destinationLimit &= 0x7fffffffU;
             count = sourceLimit > source ? sourceLimit - source : 0;
             for (index = 0; index < 6; index++)
               {
@@ -1266,7 +1277,8 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                descriptor before raising its interrupt.  The ROM polls
                that descriptor during POST, so complete it synchronously
                for the internal Ethernet loopback packet. */
-            for (index = 0x0bff0000U; accepted && index < 0x0c000000U;
+            for (index = destination & 0xffff0000U;
+                 accepted && index < (destination & 0xffff0000U) + 0x10000U;
                  index += 2U)
               {
                 NXTUInt32 descriptorStart;

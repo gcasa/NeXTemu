@@ -384,6 +384,21 @@ NXTTestGenericDMAControlStatus (void)
 }
 
 static void
+NXTTestSCSISelectionFailureInterrupt (void)
+{
+  NXTMemory *memory = [[NXTMemory alloc] init];
+  NXTUInt32 interruptStatus = 0;
+  [memory resetNeXTDevicesForTurbo:YES];
+  [memory writeByte:1 atAddress:0x02014004U];
+  [memory writeByte:0 atAddress:0x02014002U];
+  [memory writeByte:0x41 atAddress:0x02014003U];
+  [memory readLong:&interruptStatus atAddress:0x02007000U];
+  NXTAssert (interruptStatus == (1U << 26),
+             "SCSI selection failure uses the DMA completion interrupt");
+  [memory release];
+}
+
+static void
 NXTTestCompareMemoryPostincrement (void)
 {
   NXTMemory *memory;
@@ -445,6 +460,7 @@ main (void)
   NXTTestFMoveLong ();
   NXTTestSCCLocalLoopback ();
   NXTTestGenericDMAControlStatus ();
+  NXTTestSCSISelectionFailureInterrupt ();
   NXTTestCompareMemoryPostincrement ();
   if (failures == 0)
     printf ("All core tests passed.\n");

@@ -475,7 +475,7 @@ NXTCreateLabel (NSRect frame, NSString *text)
               : NXTMachineModelNeXTcubeTurbo;
   newMachine = [[NXTMachine alloc]
       initWithModel:model
-            ramSize:(model == NXTMachineModelNeXTcubeTurbo ? 128U : 16U)
+            ramSize:(model == NXTMachineModelNeXTcubeTurbo ? 128U : 64U)
                     * 1024U * 1024U];
   [newMachine setVerboseBoot:[[_verboseButton cell] state] == NSOnState];
   errorMessage = nil;

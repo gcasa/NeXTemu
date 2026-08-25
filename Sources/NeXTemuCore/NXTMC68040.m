@@ -74,6 +74,14 @@ NXTConditionTrue (NXTUInt16 condition, NXTUInt16 sr)
   return NO;
 }
 
+static BOOL
+NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
+{
+  return (address >= 0x01005c20U && address < 0x01005ca0U)
+         || (address >= 0x01005cf8U && address < 0x01005d78U)
+         || (address >= 0x01005e1cU && address < 0x01005e9cU);
+}
+
 @implementation NXTMC68040
 
 - (id)initWithMemory:(NXTMemory *)memory
@@ -654,6 +662,13 @@ NXTConditionTrue (NXTUInt16 condition, NXTUInt16 sr)
   if (_stopped)
     return _lastResult == NXTProcessorResultOK ? NXTProcessorResultStopped
                                                : _lastResult;
+  /* ROM revisions 3.0, 3.2, and 3.3 wait in the failure-panel animation
+     until D3 is cleared by a keyboard event.  There is no keyboard event
+     source yet, so dismiss the panel after it has been drawn and allow the
+     configured boot command to run. */
+  if (_programCounter == 0x01002364U || _programCounter == 0x010023feU
+      || _programCounter == 0x010024e8U)
+    _dataRegisters[3] = 0;
   _lastOpcodeAddress = _programCounter;
   if (![self fetchWord:&opcode])
     return [self fail:NXTProcessorResultBusError];
@@ -723,7 +738,7 @@ NXTConditionTrue (NXTUInt16 condition, NXTUInt16 sr)
         }
       return NXTProcessorResultOK;
     }
-  if (!(_lastOpcodeAddress >= 0x01005e20U && _lastOpcodeAddress < 0x01005e98U)
+  if (!NXTIsFirmwareFPUPostAddress (_lastOpcodeAddress)
       && (opcode & 0xffc0U) == 0xf200U && opcode != 0xf203 && opcode != 0xf204
       && opcode != 0xf21f && opcode != 0xf227)
     {
@@ -858,7 +873,7 @@ NXTConditionTrue (NXTUInt16 condition, NXTUInt16 sr)
         }
       return NXTProcessorResultOK;
     }
-  if (_lastOpcodeAddress >= 0x01005e20U && _lastOpcodeAddress < 0x01005e98U
+  if (NXTIsFirmwareFPUPostAddress (_lastOpcodeAddress)
       && (opcode & 0xf000U) == 0xf000U)
     {
       union
