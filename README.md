@@ -69,3 +69,17 @@ For the 25 MHz NeXTcube, use a NeXTcube/NeXTstation 68040 ROM such as revision
 2.5 v66. For the 33 MHz NeXTcube Turbo, use a Turbo-capable ROM such as revision
 3.3 v74 (revision 3.2 v72 is also commonly available). Do not use the 68030
 NeXT Computer ROM or a NeXTdimension EEPROM.
+
+## Disk images
+
+Use **Machine > Attach SCSI Disk** after loading a ROM. NeXTemu accepts a raw,
+sector-for-sector image of an entire SCSI disk with 512-byte sectors. The image
+must include the NeXT disk label and bootable filesystem; a partition-only UFS
+image is not sufficient. Container formats such as QCOW2, VMDK, VDI, and sparse
+bundle images are not accepted. Common filename extensions are `.img`, `.dsk`,
+and `.raw`, but validation uses the file layout rather than its extension.
+
+The selector attaches the image as SCSI target 6 and restarts the machine.
+NeXTemu implements the NCR53C90 commands used during boot, including inquiry,
+capacity, mode sense, sector reads, and Turbo DMA. Disk writes are accepted but
+discarded, so the original image remains unchanged.

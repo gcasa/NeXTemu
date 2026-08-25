@@ -80,9 +80,43 @@ static BOOL NXTAddRegisterBank(NXTMemory *memory, NXTUInt32 base, NXTUInt32 leng
     [_ramRegion release];
     [_romAliasRegion release];
     [_romRegion release];
+    [_diskImagePath release];
     [_memory release];
     [super dealloc];
 }
+
+- (BOOL)attachDiskImageAtPath:(NSString *)path error:(NSString **)errorMessage
+{
+    NSDictionary *attributes;
+    NSNumber *sizeNumber;
+    NXTUInt64 size;
+    if (errorMessage != NULL) *errorMessage = nil;
+    attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    if (attributes == nil || ![[attributes objectForKey:NSFileType]
+                               isEqualToString:NSFileTypeRegular]) {
+        if (errorMessage != NULL) *errorMessage = @"Unable to read disk image";
+        return NO;
+    }
+    sizeNumber = [attributes objectForKey:NSFileSize];
+    size = [sizeNumber unsignedLongLongValue];
+    if (size == 0 || (size & 511U) != 0) {
+        if (errorMessage != NULL)
+            *errorMessage = @"Disk image must be a non-empty raw image with 512-byte sectors";
+        return NO;
+    }
+    [path retain];
+    [_diskImagePath release];
+    _diskImagePath = path;
+    _diskImageSize = size;
+    if (![_memory attachSCSIDiskAtPath:path error:errorMessage]) {
+        [_diskImagePath release]; _diskImagePath = nil; _diskImageSize = 0;
+        return NO;
+    }
+    return YES;
+}
+
+- (NSString *)diskImagePath { return _diskImagePath; }
+- (NXTUInt64)diskImageSize { return _diskImageSize; }
 
 - (BOOL)loadROMAtPath:(NSString *)path error:(NSString **)errorMessage
 {

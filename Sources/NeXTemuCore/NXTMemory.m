@@ -1,9 +1,42 @@
 #import "NXTMemory.h"
 #include <string.h>
+#ifdef NXT_TRACE_RTC
+#include <stdio.h>
+#endif
 
 #define NXT_SCR2_RTCE   0x00000100U
 #define NXT_SCR2_RTCLK  0x00000200U
 #define NXT_SCR2_RTDATA 0x00000400U
+
+#define NXT_ESP_BASE 0x02014000U
+#define NXT_DMA_CSR  0x02000010U
+
+static NXTUInt32 NXTCanonicalIOAddress(NXTUInt32 address)
+{
+    address &= 0x7fffffffU;
+    if ((address & 0xfff00000U) == 0x02100000U) address -= 0x00100000U;
+    return address;
+}
+
+#ifdef NXT_TRACE_MMIO
+static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
+{
+    static NXTUInt8 seenRead[0x30000];
+    static NXTUInt8 seenWrite[0x30000];
+    NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+    NXTUInt32 slot;
+    NXTUInt8 *seen;
+    if (canonical < 0x02000000U || canonical >= 0x02300000U) return;
+    slot = (canonical - 0x02000000U) >> 4;
+    seen = writing ? seenWrite : seenRead;
+    if (!seen[slot]) {
+        seen[slot] = 1;
+        fprintf(stderr, "MMIO %c%u %08x\n", writing ? 'W' : 'R', size, canonical);
+    }
+}
+#else
+#define NXTTraceMMIO(address, writing, size) ((void)0)
+#endif
 
 @implementation NXTMemoryRegion
 
@@ -56,13 +89,179 @@
 
 @implementation NXTMemory
 
+- (void)resetSCSI
+{
+    memset(_espRegisters, 0, sizeof(_espRegisters));
+    memset(_espFIFO, 0, sizeof(_espFIFO));
+    memset(_dmaRegisters, 0, sizeof(_dmaRegisters));
+    _espRegisters[9] = 2;
+    _espFIFOCount = 0;
+    _espInterrupt = 0;
+    _scsiPhase = 3;
+    _scsiStatus = 0;
+    [_scsiData release];
+    _scsiData = nil;
+    _scsiDataOffset = 0;
+    /* No transfer is pending at power-on.  Advertising COMPLETE here makes
+       the ROM's SCSI DMA POST report a stale completion interrupt. */
+    _dmaState = 0;
+}
+
+- (BOOL)attachSCSIDiskAtPath:(NSString *)path error:(NSString **)errorMessage
+{
+    NSFileHandle *handle;
+    NSDictionary *attributes;
+    if (errorMessage != NULL) *errorMessage = nil;
+    handle = [NSFileHandle fileHandleForReadingAtPath:path];
+    attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    if (handle == nil || attributes == nil) {
+        if (errorMessage != NULL) *errorMessage = @"Unable to open disk image";
+        return NO;
+    }
+    [handle retain];
+    [_scsiFile closeFile];
+    [_scsiFile release];
+    _scsiFile = handle;
+    _scsiSize = [[attributes objectForKey:NSFileSize] unsignedLongLongValue];
+    [self resetSCSI];
+    return YES;
+}
+
+- (void)setSCSIResponse:(NSData *)data phase:(NXTUInt8)phase status:(NXTUInt8)status
+{
+    [data retain];
+    [_scsiData release];
+    _scsiData = data;
+    _scsiDataOffset = 0;
+    _scsiPhase = phase;
+    _scsiStatus = status;
+}
+
+- (void)executeSCSICommandWithIdentify:(BOOL)hasIdentify
+{
+    NXTUInt8 cdb[16];
+    unsigned int start = hasIdentify ? 1 : 0;
+    unsigned int count = _espFIFOCount > start ? _espFIFOCount - start : 0;
+    NXTUInt32 lba = 0, blocks = 0, allocation = 0;
+    NSMutableData *response = nil;
+    NXTUInt8 *bytes;
+    memset(cdb, 0, sizeof(cdb));
+    if (count > sizeof(cdb)) count = sizeof(cdb);
+    if (count != 0) memcpy(cdb, _espFIFO + start, count);
+    _espFIFOCount = 0;
+    if (_scsiFile == nil || (_espRegisters[4] & 7) != 6) {
+        _espInterrupt = 0x20;
+        _scsiPhase = 3;
+        return;
+    }
+    switch (cdb[0]) {
+    case 0x00:
+    case 0x04:
+    case 0x15:
+    case 0x1b:
+        [self setSCSIResponse:nil phase:3 status:0];
+        break;
+    case 0x03: {
+        NXTUInt8 sense[18];
+        allocation = cdb[4] ? cdb[4] : 18;
+        if (allocation > sizeof(sense)) allocation = sizeof(sense);
+        memset(sense, 0, sizeof(sense)); sense[0] = 0x70; sense[7] = 10;
+        [self setSCSIResponse:[NSData dataWithBytes:sense length:allocation] phase:1 status:0];
+        break;
+    }
+    case 0x12: {
+        static const NXTUInt8 inquiry[54] = {
+            0,0,1,2,49,0,0,0x1c,'N','e','X','T',' ',' ',' ',' ',
+            'H','D',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
+            '1','.','0',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
+            ' ',' ',' ',' ',' ',' '
+        };
+        allocation = cdb[4]; if (allocation > sizeof(inquiry)) allocation = sizeof(inquiry);
+        [self setSCSIResponse:[NSData dataWithBytes:inquiry length:allocation] phase:1 status:0];
+        break;
+    }
+    case 0x25: {
+        NXTUInt8 capacity[8];
+        NXTUInt32 last = (NXTUInt32)(_scsiSize / 512U - 1U);
+        capacity[0]=last>>24; capacity[1]=last>>16; capacity[2]=last>>8; capacity[3]=last;
+        capacity[4]=0; capacity[5]=0; capacity[6]=2; capacity[7]=0;
+        [self setSCSIResponse:[NSData dataWithBytes:capacity length:8] phase:1 status:0];
+        break;
+    }
+    case 0x1a: {
+        NXTUInt8 mode[12]; NXTUInt32 sectors = (NXTUInt32)(_scsiSize / 512U);
+        memset(mode, 0, sizeof(mode)); mode[0]=11; mode[3]=8;
+        mode[5]=sectors>>16; mode[6]=sectors>>8; mode[7]=sectors; mode[10]=2;
+        allocation=cdb[4]; if (allocation>sizeof(mode)) allocation=sizeof(mode);
+        [self setSCSIResponse:[NSData dataWithBytes:mode length:allocation] phase:1 status:0];
+        break;
+    }
+    case 0x08:
+    case 0x28:
+        if (cdb[0] == 0x08) {
+            lba = ((NXTUInt32)(cdb[1]&0x1f)<<16)|((NXTUInt32)cdb[2]<<8)|cdb[3];
+            blocks = cdb[4] ? cdb[4] : 256;
+        } else {
+            lba=((NXTUInt32)cdb[2]<<24)|((NXTUInt32)cdb[3]<<16)|((NXTUInt32)cdb[4]<<8)|cdb[5];
+            blocks=((NXTUInt32)cdb[7]<<8)|cdb[8];
+        }
+        if ((NXTUInt64)lba * 512U + (NXTUInt64)blocks * 512U <= _scsiSize) {
+            [_scsiFile seekToFileOffset:(unsigned long long)lba * 512ULL];
+            response = (NSMutableData *)[_scsiFile readDataOfLength:(NSUInteger)blocks * 512U];
+            [self setSCSIResponse:response phase:1 status:[response length] == blocks*512U ? 0 : 2];
+        } else [self setSCSIResponse:nil phase:3 status:2];
+        break;
+    case 0x0a:
+    case 0x2a:
+        [self setSCSIResponse:nil phase:0 status:0];
+        break;
+    default:
+        [self setSCSIResponse:nil phase:3 status:2];
+        break;
+    }
+    bytes = _espFIFO;
+    (void)bytes;
+    _espRegisters[6] = 4;
+    _espInterrupt = 0x18;
+}
+
+- (void)performSCSIDMA
+{
+    NXTUInt32 address = _dmaRegisters[4];
+    NXTUInt32 limit = _dmaRegisters[5];
+    NXTUInt32 requested = (NXTUInt32)_espRegisters[0] | ((NXTUInt32)_espRegisters[1] << 8);
+    NXTUInt32 room = limit > address ? limit - address : 0;
+    NXTUInt32 available = _scsiData == nil ? 0 : (NXTUInt32)([_scsiData length] - _scsiDataOffset);
+    NXTUInt32 amount = requested == 0 ? 65536U : requested;
+    NXTUInt32 i;
+    if (amount > room) amount = room;
+    if (_scsiPhase == 1) {
+        if (amount > available) amount = available;
+        for (i=0; i<amount; i++) [self writeByte:((const NXTUInt8 *)[_scsiData bytes])[_scsiDataOffset+i] atAddress:address+i];
+        _scsiDataOffset += amount;
+        if (_scsiDataOffset >= [_scsiData length]) _scsiPhase = 3;
+    } else if (_scsiPhase == 0) {
+        /* Images are opened read-only; consume guest writes so boot-time metadata does not stall. */
+        amount = amount > room ? room : amount;
+        _scsiPhase = 3;
+    } else amount = 0;
+    _dmaRegisters[4] = address + amount;
+    requested = (requested == 0 ? 65536U : requested) - amount;
+    _espRegisters[0] = (NXTUInt8)requested; _espRegisters[1] = (NXTUInt8)(requested >> 8);
+    _dmaState = 0x08;
+    _espInterrupt = 0x08;
+}
+
 - (void)resetNeXTDevicesForTurbo:(BOOL)turbo
 {
     NXTUInt32 sum;
     NXTUInt16 checksum;
     unsigned int index;
     memset(_rtcRegisters, 0, sizeof(_rtcRegisters));
-    _rtcRegisters[0] = 0x9c;
+    /* Keep the console on the built-in display.  Bit 27 (0x08 here)
+       selects the alternate serial console and leaves the framebuffer
+       showing the stale "Testing System" message. */
+    _rtcRegisters[0] = 0x94;
     _rtcRegisters[1] = 0x0f;
     _rtcRegisters[2] = 0x40;
     _rtcRegisters[10] = 0x02;
@@ -85,6 +284,13 @@
     _rtcBitCount = 0;
     _rtcDataBit = NO;
     _rtcPreviousClock = NO;
+    memset(_bmapRegisters, 0, sizeof(_bmapRegisters));
+    _bmapRegisters[13] = 0x20000000U;
+    memset(_adbRegisters, 0, sizeof(_adbRegisters));
+    _sccRegisterPointer = 0;
+    _interruptStatus = 0;
+    _interruptMask = 0;
+    [self resetSCSI];
 }
 
 - (NXTUInt8)rtcRegisterValue:(NXTUInt8)address
@@ -141,7 +347,12 @@
             _rtcPhase = 2;
             _rtcBitCount = 0;
             _rtcShiftIn = 0;
-            if (!_rtcIsWrite) _rtcShiftOut = [self rtcRegisterValue:_rtcAddress];
+            if (!_rtcIsWrite) {
+                _rtcShiftOut = [self rtcRegisterValue:_rtcAddress];
+#ifdef NXT_TRACE_RTC
+                fprintf(stderr, "RTC read %02x = %02x\n", _rtcAddress & 0x3f, _rtcShiftOut);
+#endif
+            }
         }
     } else if (_rtcPhase == 2 && _rtcIsWrite && falling) {
         _rtcShiftIn = (NXTUInt8)((_rtcShiftIn << 1) | (data ? 1 : 0));
@@ -175,6 +386,9 @@
 
 - (void)dealloc
 {
+    [_scsiFile closeFile];
+    [_scsiFile release];
+    [_scsiData release];
     [_regions release];
     [super dealloc];
 }
@@ -219,13 +433,51 @@
     NXTMemoryRegion *region;
     NXTUInt32 canonical;
     if (value == NULL) return NXTMemoryResultOutOfRange;
+    NXTTraceMMIO(address, NO, 1);
     canonical = address & 0x7fffffffU;
     if ((canonical & 0xfff00000U) == 0x02100000U) canonical -= 0x00100000U;
-    if (canonical >= 0x02208000U && canonical < 0x02208008U) {
+    if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U) {
+        unsigned int reg = canonical - NXT_ESP_BASE;
+        if (reg == 2) {
+            *value = _espFIFOCount ? _espFIFO[0] : 0;
+            if (_espFIFOCount) {
+                memmove(_espFIFO, _espFIFO + 1, --_espFIFOCount);
+            }
+        } else if (reg == 4) {
+            *value = (NXTUInt8)(0x80U | (_scsiPhase & 7U) |
+                     ((_espRegisters[0] == 0 && _espRegisters[1] == 0) ? 0x10U : 0));
+        } else if (reg == 5) {
+            *value = _espInterrupt; _espInterrupt = 0;
+        } else if (reg == 7) *value = (NXTUInt8)_espFIFOCount;
+        else *value = _espRegisters[reg];
+        return NXTMemoryResultOK;
+    }
+    if (canonical == NXT_ESP_BASE + 0x20U) { *value = _espRegisters[12]; return NXTMemoryResultOK; }
+    if (canonical == NXT_ESP_BASE + 0x21U) { *value = _espInterrupt ? 1 : 0; return NXTMemoryResultOK; }
+    if (canonical >= 0x0200e000U && canonical < 0x0200e010U) {
+        region = [self regionContainingAddress:canonical length:1];
+        *value = canonical == 0x0200e002U ? 0x02U :
+            (region == nil ? 0 : [region mutableBytes][canonical - [region baseAddress]]);
+        if (canonical >= 0x0200e008U) _interruptStatus &= ~0x10U;
+        return NXTMemoryResultOK;
+    }
+    if (canonical >= 0x02018000U && canonical < 0x02018004U) {
+        switch (canonical - 0x02018000U) {
+        case 0: *value = 0x04; break; /* channel B: transmitter empty */
+        case 1:
+            *value = _sccRegisterPointer == 1 ? 0x07 :
+                (_sccRegisterPointer == 0 ? 0x2c : 0);
+            _sccRegisterPointer = 0;
+            break;
+        default: *value = 0; break;
+        }
+        return NXTMemoryResultOK;
+    }
+    if (canonical >= 0x02008000U && canonical < 0x02008008U) {
         static const NXTUInt8 dspRegisters[8] = {
             0x00, 0x00, 0x9f, 0x0f, 0x00, 0x00, 0x00, 0x00
         };
-        *value = dspRegisters[canonical - 0x02208000U];
+        *value = dspRegisters[canonical - 0x02008000U];
         return NXTMemoryResultOK;
     }
     if (canonical >= 0x0201a000U && canonical <= 0x0201a003U) {
@@ -252,7 +504,8 @@
     NXTMemoryRegion *region;
     NXTUInt8 *bytes;
     if (value == NULL) return NXTMemoryResultOutOfRange;
-    if ((address & 0x7ffffffeU) == 0x02208000U) {
+    NXTTraceMMIO(address, NO, 2);
+    if ((address & 0x7ffffffeU) == 0x02008000U) {
         *value = (address & 2) != 0 ? 0x9f0fU : 0;
         return NXTMemoryResultOK;
     }
@@ -268,8 +521,30 @@
     NXTMemoryRegion *region;
     NXTUInt8 *bytes;
     if (value == NULL) return NXTMemoryResultOutOfRange;
-    if ((address & 0x7ffffffcU) == 0x02208000U) {
-        *value = 0x0000000fU;
+    NXTTraceMMIO(address, NO, 4);
+    {
+        NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+        if (canonical == NXT_DMA_CSR) { *value = ((NXTUInt32)_dmaState << 24) | 0x40U; return NXTMemoryResultOK; }
+        if (canonical == 0x02007000U) { *value = _interruptStatus; return NXTMemoryResultOK; }
+        if (canonical == 0x02007800U) { *value = _interruptMask; return NXTMemoryResultOK; }
+        if (canonical >= 0x020c0000U && canonical < 0x020c0040U) {
+            *value = _bmapRegisters[(canonical - 0x020c0000U) >> 2]; return NXTMemoryResultOK;
+        }
+        if (canonical == 0x02200010U) { *value = 0x0d17038fU; return NXTMemoryResultOK; }
+        if (canonical == 0x02200088U) { *value = 0x304a4118U; return NXTMemoryResultOK; }
+        if (canonical == 0x0220008cU) { *value = 0x10430340U; return NXTMemoryResultOK; }
+        if (canonical >= 0x02208000U && canonical <= 0x02208088U &&
+            (canonical & 3U) == 0) {
+            *value = _adbRegisters[(canonical - 0x02208000U) >> 2];
+            return NXTMemoryResultOK;
+        }
+        if (canonical >= 0x02004000U && canonical <= 0x0200401cU && (canonical & 3U) == 0) {
+            *value = _dmaRegisters[(canonical - 0x02004000U) >> 2]; return NXTMemoryResultOK;
+        }
+        if (canonical == 0x02004210U) { *value = _dmaRegisters[8]; return NXTMemoryResultOK; }
+    }
+    if ((address & 0x7ffffffcU) == 0x02008000U) {
+        *value = 0x00009f0fU;
         return NXTMemoryResultOK;
     }
     if ((address & 0x7fffffffU) == 0x0200d000U) {
@@ -291,6 +566,46 @@
 - (NXTMemoryResult)writeByte:(NXTUInt8)value atAddress:(NXTUInt32)address
 {
     NXTMemoryRegion *region;
+    NXTTraceMMIO(address, YES, 1);
+    NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+    if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U) {
+        unsigned int reg = canonical - NXT_ESP_BASE;
+        if (reg == 2) {
+            if (_espFIFOCount < sizeof(_espFIFO)) _espFIFO[_espFIFOCount++] = value;
+        } else if (reg == 3) {
+            NXTUInt8 command = value & 0x7fU;
+            if (command == 1) _espFIFOCount = 0;
+            else if (command == 2 || command == 3) [self resetSCSI];
+            else if (command == 0x41 || command == 0x42) [self executeSCSICommandWithIdentify:command == 0x42];
+            else if (command == 0x10) {
+                if (value & 0x80U) [self performSCSIDMA];
+                else if (_scsiPhase == 1 && _scsiDataOffset < [_scsiData length]) {
+                    _espFIFO[0] = ((const NXTUInt8 *)[_scsiData bytes])[_scsiDataOffset++]; _espFIFOCount = 1; _espInterrupt = 8;
+                }
+            } else if (command == 0x11) {
+                _espFIFO[0] = _scsiStatus; _espFIFO[1] = 0; _espFIFOCount = 2; _scsiPhase = 7; _espInterrupt = 8;
+            } else if (command == 0x12) { _scsiPhase = 3; _espInterrupt = 0x10; }
+            _espRegisters[3] = value;
+        } else _espRegisters[reg] = value;
+        return NXTMemoryResultOK;
+    }
+    if (canonical == NXT_ESP_BASE + 0x20U) { _espRegisters[12] = value; return NXTMemoryResultOK; }
+    if (canonical >= 0x0200e000U && canonical < 0x0200e010U) {
+        region = [self regionContainingAddress:canonical length:1];
+        if (region != nil) [region mutableBytes][canonical - [region baseAddress]] = value;
+        if (canonical >= 0x0200e004U && canonical < 0x0200e008U)
+            _interruptStatus |= 0x10U;
+        return NXTMemoryResultOK;
+    }
+    if (canonical >= 0x02018000U && canonical < 0x02018004U) {
+        if (canonical - 0x02018000U == 1) {
+            if (_sccRegisterPointer == 0)
+                _sccRegisterPointer = (NXTUInt8)((value & 7U) |
+                    (((value & 0x38U) == 0x08U) ? 8U : 0U));
+            else _sccRegisterPointer = 0;
+        }
+        return NXTMemoryResultOK;
+    }
     region = [self regionContainingAddress:address length:1];
     if (region == nil) return NXTMemoryResultUnmapped;
     if ([region isReadOnly]) return NXTMemoryResultReadOnly;
@@ -301,6 +616,7 @@
 - (NXTMemoryResult)writeWord:(NXTUInt16)value atAddress:(NXTUInt32)address
 {
     NXTMemoryRegion *region;
+    NXTTraceMMIO(address, YES, 2);
     NXTUInt8 *bytes;
     region = [self regionContainingAddress:address length:2];
     if (region == nil) return NXTMemoryResultUnmapped;
@@ -314,7 +630,48 @@
 - (NXTMemoryResult)writeLong:(NXTUInt32)value atAddress:(NXTUInt32)address
 {
     NXTMemoryRegion *region;
+    NXTTraceMMIO(address, YES, 4);
     NXTUInt8 *bytes;
+    {
+        NXTUInt32 canonical = NXTCanonicalIOAddress(address);
+        if (canonical == NXT_DMA_CSR) {
+            if (value & 0x00100000U) _dmaState &= ~(0x0bU);
+            if (value & 0x00010000U) _dmaState |= 1U;
+            if (value & 0x00020000U) _dmaState |= 2U;
+            if (value & 0x00080000U) _dmaState &= ~8U;
+            return NXTMemoryResultOK;
+        }
+        if (canonical == 0x02007800U) { _interruptMask = value; return NXTMemoryResultOK; }
+        if (canonical >= 0x020c0000U && canonical < 0x020c0040U) {
+            _bmapRegisters[(canonical - 0x020c0000U) >> 2] = value; return NXTMemoryResultOK;
+        }
+        if (canonical == 0x02200010U ||
+            (canonical >= 0x02200080U && canonical < 0x02200090U))
+            return NXTMemoryResultOK;
+        if (canonical >= 0x02208000U && canonical <= 0x02208088U &&
+            (canonical & 3U) == 0) {
+            NXTUInt32 adbOffset = canonical - 0x02208000U;
+            if (adbOffset == 0x00U) _adbRegisters[0] &= ~value;
+            else if (adbOffset == 0x10U) _adbRegisters[0] |= value;
+            else if (adbOffset == 0x20U) {
+                if (value & 0x08U) {
+                    _adbRegisters[0x28U >> 2] &= ~0x40U;
+                    _adbRegisters[0] |= 0x08U;
+                }
+                if (value & 0x04U) {
+                    _adbRegisters[0x28U >> 2] |= 0x04U;
+                    _adbRegisters[0] |= 0x04U;
+                }
+                if (value & 0x02U) _adbRegisters[0x28U >> 2] &= ~0x40U;
+                if (value & 0x01U) _adbRegisters[0x28U >> 2] |= 0x40U;
+            } else _adbRegisters[adbOffset >> 2] = value;
+            return NXTMemoryResultOK;
+        }
+        if (canonical >= 0x02004000U && canonical <= 0x0200401cU && (canonical & 3U) == 0) {
+            _dmaRegisters[(canonical - 0x02004000U) >> 2] = value; return NXTMemoryResultOK;
+        }
+        if (canonical == 0x02004210U) { _dmaRegisters[8]=value; _dmaRegisters[4]=value; return NXTMemoryResultOK; }
+    }
     if ((address & 0x7fffffffU) == 0x0200d000U) {
         NXTUInt32 oldValue = _scr2Value;
         _scr2Value = value;

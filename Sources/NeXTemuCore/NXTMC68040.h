@@ -31,6 +31,9 @@ typedef enum {
     NXTUInt32 _translationControl;
     NXTUInt32 _userRootPointer;
     NXTUInt32 _supervisorRootPointer;
+    NXTUInt8 _fpRegisters[8][12];
+    double _fpValues[8];
+    BOOL _fpComparisonEqual;
 }
 
 - (id)initWithMemory:(NXTMemory *)memory;

@@ -9,6 +9,7 @@
     NSWindow *_window;
     NSPopUpButton *_modelButton;
     NSTextField *_romField;
+    NSTextField *_diskField;
     NSTextField *_statusField;
     NSTextField *_registerField;
     NSView *_displayView;
@@ -20,6 +21,7 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification;
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)application;
 - (void)openROM:(id)sender;
+- (void)openDiskImage:(id)sender;
 - (void)resetMachine:(id)sender;
 - (void)showAboutPanel:(id)sender;
 - (BOOL)loadROMAtPath:(NSString *)path showErrors:(BOOL)showErrors;

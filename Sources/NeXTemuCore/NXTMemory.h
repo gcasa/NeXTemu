@@ -38,6 +38,23 @@
     BOOL _rtcIsWrite;
     BOOL _rtcDataBit;
     BOOL _rtcPreviousClock;
+    NSFileHandle *_scsiFile;
+    NXTUInt64 _scsiSize;
+    NXTUInt8 _espRegisters[16];
+    NXTUInt8 _espFIFO[32];
+    unsigned int _espFIFOCount;
+    NXTUInt8 _espInterrupt;
+    NXTUInt8 _scsiPhase;
+    NXTUInt8 _scsiStatus;
+    NSData *_scsiData;
+    NSUInteger _scsiDataOffset;
+    NXTUInt32 _dmaRegisters[9];
+    NXTUInt8 _dmaState;
+    NXTUInt32 _bmapRegisters[16];
+    NXTUInt32 _adbRegisters[35];
+    NXTUInt8 _sccRegisterPointer;
+    NXTUInt32 _interruptStatus;
+    NXTUInt32 _interruptMask;
 }
 
 - (BOOL)addRegion:(NXTMemoryRegion *)region;
@@ -51,6 +68,7 @@
 - (NXTMemoryResult)writeLong:(NXTUInt32)value atAddress:(NXTUInt32)address;
 - (NXTMemoryResult)loadData:(NSData *)data atAddress:(NXTUInt32)address;
 - (void)resetNeXTDevicesForTurbo:(BOOL)turbo;
+- (BOOL)attachSCSIDiskAtPath:(NSString *)path error:(NSString **)errorMessage;
 
 @end
 

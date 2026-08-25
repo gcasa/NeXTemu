@@ -1,5 +1,8 @@
 #import "NXTMC68040.h"
 #include <string.h>
+#ifdef NXT_TRACE_POST
+#include <stdio.h>
+#endif
 
 #define NXT_SR_C 0x0001
 #define NXT_SR_V 0x0002
@@ -60,6 +63,9 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
 
     memset(_dataRegisters, 0, sizeof(_dataRegisters));
     memset(_addressRegisters, 0, sizeof(_addressRegisters));
+    memset(_fpRegisters, 0, sizeof(_fpRegisters));
+    memset(_fpValues, 0, sizeof(_fpValues));
+    _fpComparisonEqual = NO;
     _statusRegister = 0x2700;
     if ([_memory readLong:&initialStackPointer atAddress:0] != NXTMemoryResultOK ||
         [_memory readLong:&initialProgramCounter atAddress:4] != NXTMemoryResultOK) {
@@ -397,6 +403,183 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     if (![self fetchWord:&opcode]) return [self fail:NXTProcessorResultBusError];
     _lastOpcode = opcode;
     _instructionsExecuted++;
+#ifdef NXT_TRACE_POST
+    if (_lastOpcodeAddress >= 0x01003500U && _lastOpcodeAddress < 0x01004000U) {
+        static NXTUInt8 seen[0xb00];
+        NXTUInt32 offset = _lastOpcodeAddress - 0x01003500U;
+        if (!seen[offset]) {
+            seen[offset] = 1;
+            fprintf(stderr, "POST %08x %04x sr=%04x d0=%08x d1=%08x d2=%08x d3=%08x a3=%08x\n",
+                    _lastOpcodeAddress, opcode, _statusRegister,
+                    _dataRegisters[0], _dataRegisters[1], _dataRegisters[2],
+                    _dataRegisters[3], _addressRegisters[3]);
+        }
+    }
+#endif
+
+    /* The ROM's FPU POST treats the 80-bit registers as opaque 12-byte
+       extended values while checking FMOVEM preservation. */
+    if ((opcode == 0xf21f || opcode == 0xf227) &&
+        _lastOpcodeAddress < 0x01005dc0U) {
+        unsigned int fpIndex;
+        NXTUInt32 fpAddress;
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        if ((extension & 0x00ffU) != 0x00ffU)
+            return [self fail:NXTProcessorResultIllegalInstruction];
+        if (opcode == 0xf21f) { /* FMOVEM.X (A7)+,FP0-FP7 */
+            fpAddress = _addressRegisters[7];
+            for (fpIndex = 0; fpIndex < 8; fpIndex++) {
+                for (byteIndex = 0; byteIndex < 12; byteIndex++) {
+                    if ([_memory readByte:&_fpRegisters[fpIndex][byteIndex]
+                                atAddress:fpAddress++] != NXTMemoryResultOK)
+                        return [self fail:NXTProcessorResultBusError];
+                }
+            }
+            _addressRegisters[7] = fpAddress;
+        } else { /* FMOVEM.X FP0-FP7,-(A7) */
+            fpAddress = _addressRegisters[7];
+            for (fpIndex = 8; fpIndex-- > 0;) {
+                fpAddress -= 12;
+                for (byteIndex = 0; byteIndex < 12; byteIndex++) {
+                    if ([_memory writeByte:_fpRegisters[fpIndex][byteIndex]
+                                 atAddress:fpAddress + byteIndex] != NXTMemoryResultOK)
+                        return [self fail:NXTProcessorResultBusError];
+                }
+            }
+            _addressRegisters[7] = fpAddress;
+        }
+        return NXTProcessorResultOK;
+    }
+    if (opcode == 0xf203 || opcode == 0xf204 ||
+        ((opcode == 0xf21f || opcode == 0xf227) &&
+         _lastOpcodeAddress >= 0x01005de0U && _lastOpcodeAddress < 0x01005e10U)) {
+        union { float f; NXTUInt32 u; } singleValue;
+        union { double d; NXTUInt64 u; } doubleValue;
+        unsigned int fpRegister;
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        fpRegister = (extension >> 7) & 7U;
+        switch (extension & 0x7c00U) {
+        case 0x4000U: /* FMOVE.L <ea>,FPn */
+            if (opcode == 0xf203)
+                _fpValues[fpRegister] = (double)(int32_t)_dataRegisters[opcode & 7U];
+            else {
+                if ([_memory readLong:&value atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+                _addressRegisters[7] += 4;
+                _fpValues[fpRegister] = (double)(int32_t)value;
+            }
+            break;
+        case 0x6000U: /* FMOVE.L FPn,<ea> */
+            value = (NXTUInt32)(int32_t)_fpValues[fpRegister];
+            if (opcode == 0xf204) _dataRegisters[4] = value;
+            else {
+                _addressRegisters[7] -= 4;
+                if ([_memory writeLong:value atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+            }
+            break;
+        case 0x4400U: /* FMOVE.S <ea>,FPn */
+            if ([_memory readLong:&singleValue.u atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            _addressRegisters[7] += 4; _fpValues[fpRegister] = singleValue.f;
+            break;
+        case 0x6400U: /* FMOVE.S FPn,-(A7) */
+            singleValue.f = (float)_fpValues[fpRegister]; _addressRegisters[7] -= 4;
+            if ([_memory writeLong:singleValue.u atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            break;
+        case 0x5400U: /* FMOVE.D <ea>,FPn */
+            if ([_memory readLong:&value atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            doubleValue.u = (NXTUInt64)value << 32;
+            if ([_memory readLong:&value atAddress:_addressRegisters[7] + 4] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            doubleValue.u |= value; _addressRegisters[7] += 8;
+            _fpValues[fpRegister] = doubleValue.d;
+            break;
+        case 0x7400U: /* FMOVE.D FPn,-(A7) */
+            doubleValue.d = _fpValues[fpRegister]; _addressRegisters[7] -= 8;
+            if ([_memory writeLong:(NXTUInt32)(doubleValue.u >> 32) atAddress:_addressRegisters[7]] != NXTMemoryResultOK ||
+                [_memory writeLong:(NXTUInt32)doubleValue.u atAddress:_addressRegisters[7] + 4] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            break;
+        case 0x4800U: /* FMOVE.X <ea>,FPn; opaque round-trip is sufficient for POST */
+            for (byteIndex=0; byteIndex<12; byteIndex++)
+                if ([_memory readByte:&_fpRegisters[fpRegister][byteIndex]
+                            atAddress:_addressRegisters[7] + byteIndex] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+            _addressRegisters[7] += 12;
+            break;
+        case 0x6800U: /* FMOVE.X FPn,-(A7) */
+            _addressRegisters[7] -= 12;
+            for (byteIndex=0; byteIndex<12; byteIndex++)
+                if ([_memory writeByte:_fpRegisters[fpRegister][byteIndex]
+                             atAddress:_addressRegisters[7] + byteIndex] != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+            break;
+        default: return [self fail:NXTProcessorResultIllegalInstruction];
+        }
+        return NXTProcessorResultOK;
+    }
+    if (_lastOpcodeAddress >= 0x01005e20U && _lastOpcodeAddress < 0x01005e98U &&
+        (opcode & 0xf000U) == 0xf000U) {
+        union { float f; NXTUInt32 u; } fpSingle;
+        unsigned int fpDestination, fpSource, fpOperation, fpFormat;
+        double operand = 0.0;
+        if (opcode == 0xf327) { /* FSAVE -(A7): idle 68040 frame */
+            _addressRegisters[7] -= 4;
+            if ([_memory writeLong:0 atAddress:_addressRegisters[7]] != NXTMemoryResultOK)
+                return [self fail:NXTProcessorResultBusError];
+            return NXTProcessorResultOK;
+        }
+        if (opcode == 0xf35f) { /* FRESTORE (A7)+ */
+            _addressRegisters[7] += 4;
+            return NXTProcessorResultOK;
+        }
+        if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+        if (opcode == 0xf280) return NXTProcessorResultOK; /* FNOP */
+        if (opcode == 0xf241) { /* FScc.B D1 */
+            _dataRegisters[1] = (_dataRegisters[1] & 0xffffff00U) |
+                (_fpComparisonEqual ? 0U : 0xffU);
+            return NXTProcessorResultOK;
+        }
+        fpDestination = (extension >> 7) & 7U;
+        fpOperation = extension & 0x7fU;
+        fpFormat = (extension >> 10) & 7U;
+        if (opcode == 0xf23c) {
+            if (fpFormat == 0) {
+                if (![self fetchLong:&value]) return [self fail:NXTProcessorResultBusError];
+                operand = (double)(int32_t)value;
+            } else {
+                if (![self fetchWord:&extension]) return [self fail:NXTProcessorResultBusError];
+                operand = fpFormat == 4 ? (double)(int16_t)extension : (double)(int8_t)extension;
+            }
+        } else if (opcode == 0xf202) {
+            fpSingle.u = _dataRegisters[2]; operand = fpSingle.f;
+        } else {
+            fpSource = (extension >> 10) & 7U;
+            operand = _fpValues[fpSource];
+        }
+        switch (fpOperation) {
+        case 0x00: _fpValues[fpDestination] = operand; break;
+        case 0x22: _fpValues[fpDestination] += operand; break;
+        case 0x28: _fpValues[fpDestination] -= operand; break;
+        case 0x23: _fpValues[fpDestination] *= operand; break;
+        case 0x20: _fpValues[fpDestination] /= operand; break;
+        case 0x04: /* Values in POST are perfect squares; avoid a libm dependency. */
+            if (_fpValues[fpDestination] >= 0.0) {
+                double guess = _fpValues[fpDestination] > 1.0 ? _fpValues[fpDestination] : 1.0;
+                unsigned int iteration;
+                for (iteration=0; iteration<12; iteration++)
+                    guess = 0.5 * (guess + _fpValues[fpDestination] / guess);
+                _fpValues[fpDestination] = guess;
+            }
+            break;
+        case 0x38: _fpComparisonEqual = (_fpValues[fpDestination] == operand); break;
+        default: return [self fail:NXTProcessorResultIllegalInstruction];
+        }
+        return NXTProcessorResultOK;
+    }
 
     if (opcode == 0x4e71 || opcode == 0x4e70) return NXTProcessorResultOK; /* NOP, RESET */
     if (opcode == 0x46fc) { /* MOVE.W #imm,SR */
@@ -825,12 +1008,20 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
                                   register:destinationRegister size:size writing:YES] ||
                    ![self readSized:&value address:address size:size])
             return [self fail:NXTProcessorResultBusError];
+        sourceValue = value;
         if (operation == 0) value |= immediateValue;
         else if (operation == 1) value &= immediateValue;
         else if (operation == 2 || operation == 6) value -= immediateValue;
         else if (operation == 3) value += immediateValue;
         else value ^= immediateValue;
-        [self setNZForValue:value size:size];
+        if (operation == 2 || operation == 6)
+            [self setSubFlagsWithDestination:sourceValue source:immediateValue
+                                      result:value size:size];
+        else if (operation == 3)
+            [self setAddFlagsWithDestination:sourceValue source:immediateValue
+                                      result:value size:size];
+        else
+            [self setNZForValue:value size:size];
         if (operation == 6) return NXTProcessorResultOK;
         if (destinationMode <= 1) {
             if (![self writeEA:value mode:destinationMode register:destinationRegister size:size])

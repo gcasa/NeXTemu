@@ -1,5 +1,7 @@
 #import "NXTAppDelegate.h"
 
+static NSString * const NXTSCSIDiskPathDefaultsKey = @"NXTSCSIDiskImagePath";
+
 @interface NXTDisplayView : NSView
 {
     NXTMemory *_memory;
@@ -100,6 +102,10 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
 {
     [_emulationTimer invalidate];
     [_emulationTimer release];
+    [_diskField release];
+    [_romField release];
+    [_statusField release];
+    [_registerField release];
     [_machine release];
     [_window release];
     [super dealloc];
@@ -136,6 +142,9 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [machineMenu addItemWithTitle:@"Open ROM..."
                             action:@selector(openROM:)
                      keyEquivalent:@"o"];
+    [machineMenu addItemWithTitle:@"Attach SCSI Disk..."
+                            action:@selector(openDiskImage:)
+                     keyEquivalent:@"d"];
     [machineMenu addItemWithTitle:@"Reset"
                             action:@selector(resetMachine:)
                      keyEquivalent:@"r"];
@@ -150,6 +159,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     NSTextField *modelLabel;
     NSButton *openButton;
     NSButton *resetButton;
+    NSButton *diskButton;
     NSUInteger style;
 
     style = NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask;
@@ -184,7 +194,17 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     [_romField setLineBreakMode:NSLineBreakByTruncatingMiddle];
     [contentView addSubview:_romField];
 
-    _displayView = [[NXTDisplayView alloc] initWithFrame:NSMakeRect(24, 96, 712, 392)];
+    _diskField = [NXTCreateLabel(NSMakeRect(24, 480, 520, 22), @"No SCSI disk attached") retain];
+    [_diskField setLineBreakMode:NSLineBreakByTruncatingMiddle];
+    [contentView addSubview:_diskField];
+    diskButton = [[[NSButton alloc] initWithFrame:NSMakeRect(570, 480, 166, 30)] autorelease];
+    [diskButton setTitle:@"Attach Disk..."];
+    [diskButton setBezelStyle:NSRoundedBezelStyle];
+    [diskButton setTarget:self];
+    [diskButton setAction:@selector(openDiskImage:)];
+    [contentView addSubview:diskButton];
+
+    _displayView = [[NXTDisplayView alloc] initWithFrame:NSMakeRect(24, 96, 712, 368)];
     [contentView addSubview:_displayView];
     [_displayView release];
 
@@ -208,6 +228,42 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
                                                      selector:@selector(emulationTick:)
                                                      userInfo:nil
                                                       repeats:YES] retain];
+}
+
+- (void)openDiskImage:(id)sender
+{
+    NSOpenPanel *panel;
+    NSInteger response;
+    NSString *path;
+    NSString *errorMessage;
+    (void)sender;
+    if (_machine == nil) {
+        NSRunAlertPanel(@"No Machine", @"Load a ROM before attaching a disk image.",
+                        @"OK", nil, nil);
+        return;
+    }
+    panel = [NSOpenPanel openPanel];
+    [panel setAllowsMultipleSelection:NO];
+    [panel setCanChooseDirectories:NO];
+    [panel setCanChooseFiles:YES];
+    response = [panel runModal];
+    if (response != NSOKButton) return;
+    path = [panel filename];
+    errorMessage = nil;
+    if (![_machine attachDiskImageAtPath:path error:&errorMessage]) {
+        NSRunAlertPanel(@"Cannot Attach Disk", @"%@", @"OK", nil, nil, errorMessage);
+        return;
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:path
+                                              forKey:NXTSCSIDiskPathDefaultsKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [_diskField setStringValue:[NSString stringWithFormat:@"SCSI disk: %@ (%.1f MiB)",
+        path, (double)[_machine diskImageSize] / (1024.0 * 1024.0)]];
+    if (![_machine reset]) {
+        [_statusField setStringValue:@"SCSI disk attached, but the machine could not reset"];
+        return;
+    }
+    [_statusField setStringValue:@"SCSI disk attached at target 6 — machine restarted"];
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification
@@ -255,6 +311,7 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
 - (BOOL)loadROMAtPath:(NSString *)path showErrors:(BOOL)showErrors
 {
     NSString *errorMessage;
+    NSString *savedDiskPath;
     NXTMachineModel model;
     NXTMachine *newMachine;
 
@@ -277,6 +334,20 @@ static NSTextField *NXTCreateLabel(NSRect frame, NSString *text)
     }
     [_machine release];
     _machine = newMachine;
+    [_diskField setStringValue:@"No SCSI disk attached"];
+    savedDiskPath = [[NSUserDefaults standardUserDefaults]
+        stringForKey:NXTSCSIDiskPathDefaultsKey];
+    if (savedDiskPath != nil &&
+        [[NSFileManager defaultManager] fileExistsAtPath:savedDiskPath]) {
+        errorMessage = nil;
+        if ([_machine attachDiskImageAtPath:savedDiskPath error:&errorMessage]) {
+            [_diskField setStringValue:[NSString stringWithFormat:@"SCSI disk: %@ (%.1f MiB)",
+                savedDiskPath, (double)[_machine diskImageSize] / (1024.0 * 1024.0)]];
+        } else {
+            [[NSUserDefaults standardUserDefaults]
+                removeObjectForKey:NXTSCSIDiskPathDefaultsKey];
+        }
+    }
     [(NXTDisplayView *)_displayView setMemory:[_machine memory]];
     [_romField setStringValue:path];
     [self resetMachine:self];

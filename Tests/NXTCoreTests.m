@@ -193,6 +193,68 @@ static void NXTTestExtendedBranches(void)
     [memory release];
 }
 
+static void NXTTestImmediateCompareCarry(void)
+{
+    NXTMemory *memory;
+    NXTMemoryRegion *image;
+    NXTMemoryRegion *stack;
+    NXTMC68040 *processor;
+    NXTUInt8 vectors[8] = { 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00 };
+    NXTUInt8 code[] = {
+        0x20, 0x3c, 0x12, 0x34, 0x56, 0x78, /* MOVE.L #$12345678,D0 */
+        0x0c, 0x80, 0x89, 0xab, 0xcd, 0xef, /* CMPI.L #$89abcdef,D0 */
+        0x62, 0x02,                         /* BHI skips only if C=0 && Z=0 */
+        0x72, 0x01,                         /* Correct borrow path. */
+        0x4e, 0x72, 0x27, 0x00
+    };
+    memory = [[NXTMemory alloc] init];
+    image = [[NXTMemoryRegion alloc] initWithBaseAddress:0 length:0x200 readOnly:YES];
+    stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1f00 length:0x100 readOnly:NO];
+    [memory addRegion:image]; [memory addRegion:stack];
+    [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+    [memory loadData:[NSData dataWithBytes:code length:sizeof(code)] atAddress:0x100];
+    processor = [[NXTMC68040 alloc] initWithMemory:memory];
+    NXTAssert([processor reset], "resets immediate-compare flag test");
+    NXTAssert([processor step] == NXTProcessorResultOK &&
+              [processor step] == NXTProcessorResultOK,
+              "executes immediate comparison");
+    NXTAssert(([processor statusRegister] & 1U) != 0,
+              "CMPI sets carry when unsigned subtraction borrows");
+    NXTAssert([processor runForInstructionCount:10] == NXTProcessorResultStopped,
+              "runs immediate-compare branch test");
+    NXTAssert([processor dataRegister:1] == 1,
+              "BHI observes carry from CMPI");
+    [processor release]; [stack release]; [image release]; [memory release];
+}
+
+static void NXTTestFMoveLong(void)
+{
+    NXTMemory *memory;
+    NXTMemoryRegion *image;
+    NXTMemoryRegion *stack;
+    NXTMC68040 *processor;
+    NXTUInt8 vectors[8] = { 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00 };
+    NXTUInt8 code[] = {
+        0x26, 0x3c, 0x00, 0x00, 0x80, 0x00, /* MOVE.L #$8000,D3 */
+        0xf2, 0x03, 0x40, 0x80,             /* FMOVE.L D3,FP1 */
+        0xf2, 0x04, 0x60, 0x80,             /* FMOVE.L FP1,D4 */
+        0x4e, 0x72, 0x27, 0x00
+    };
+    memory = [[NXTMemory alloc] init];
+    image = [[NXTMemoryRegion alloc] initWithBaseAddress:0 length:0x200 readOnly:YES];
+    stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1f00 length:0x100 readOnly:NO];
+    [memory addRegion:image]; [memory addRegion:stack];
+    [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+    [memory loadData:[NSData dataWithBytes:code length:sizeof(code)] atAddress:0x100];
+    processor = [[NXTMC68040 alloc] initWithMemory:memory];
+    NXTAssert([processor reset], "resets FMOVE test");
+    NXTAssert([processor runForInstructionCount:10] == NXTProcessorResultStopped,
+              "executes FMOVE outside the ROM POST address range");
+    NXTAssert([processor dataRegister:4] == 0x8000,
+              "round-trips an integer through an FP register");
+    [processor release]; [stack release]; [image release]; [memory release];
+}
+
 int main(void)
 {
     NSAutoreleasePool *pool;
@@ -203,6 +265,8 @@ int main(void)
     NXTTestMachineROMAliases();
     NXTTestEffectiveAddresses();
     NXTTestExtendedBranches();
+    NXTTestImmediateCompareCarry();
+    NXTTestFMoveLong();
     if (failures == 0) printf("All core tests passed.\n");
     [pool drain];
     return failures == 0 ? 0 : 1;
