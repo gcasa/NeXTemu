@@ -353,24 +353,32 @@ static void
 NXTTestFMoveControlRegister (void)
 {
   NXTMemory *memory;
-  NXTMemoryRegion *image, *stack;
+  NXTMemoryRegion *image, *ram, *stack;
   NXTMC68040 *processor;
   NXTUInt8 vectors[8] = { 0, 0, 0x20, 0, 0, 0, 1, 0 };
   NXTUInt8 code[] = {
+    0x20, 0x7c, 0,    0,    0x10, 0x00, /* MOVEA.L #$1000,A0 */
     0x24, 0x3c, 0x12, 0x34, 0x56, 0x78, /* MOVE.L #$12345678,D2 */
     0xf2, 0x02, 0x90, 0x00,             /* FMOVE.L D2,FPCR */
     0xf2, 0x01, 0xb0, 0x00,             /* FMOVE.L FPCR,D1 */
+    0xf2, 0x28, 0xbc, 0x00, 0,    0x10, /* FMOVEM.L FPcr,$10(A0) */
+    0xf2, 0x28, 0xf0, 0xff, 0,    0x20, /* FMOVEM.X FP0-FP7,$20(A0) */
     0x4e, 0x72, 0x27, 0x00              /* STOP #$2700 */
   };
+  NXTUInt32 value = 0;
 
   memory = [[NXTMemory alloc] init];
   image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
                                                 length:0x200
                                               readOnly:YES];
+  ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000
+                                              length:0x100
+                                            readOnly:NO];
   stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1f00
                                                 length:0x100
                                               readOnly:NO];
   [memory addRegion:image];
+  [memory addRegion:ram];
   [memory addRegion:stack];
   [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
   [memory loadData:[NSData dataWithBytes:code length:sizeof (code)]
@@ -382,8 +390,12 @@ NXTTestFMoveControlRegister (void)
              "executes FPCR transfers");
   NXTAssert ([processor dataRegister:1] == 0x12345678,
              "round-trips FPCR through a data register");
+  [memory readLong:&value atAddress:0x1010];
+  NXTAssert (value == 0x12345678,
+             "saves multiple FP control registers to memory");
   [processor release];
   [stack release];
+  [ram release];
   [image release];
   [memory release];
 }
@@ -439,8 +451,35 @@ NXTTestSCSISelectionFailureInterrupt (void)
   [memory writeByte:0 atAddress:0x02014002U];
   [memory writeByte:0x41 atAddress:0x02014003U];
   [memory readLong:&interruptStatus atAddress:0x02007000U];
-  NXTAssert (interruptStatus == (1U << 26),
-             "SCSI selection failure uses the DMA completion interrupt");
+  NXTAssert (interruptStatus == ((1U << 12) | (1U << 13)),
+             "SCSI selection failure raises the controller interrupt");
+  [memory release];
+}
+
+static void
+NXTTestSCSINonzeroLUN (void)
+{
+  NXTMemory *memory = [[NXTMemory alloc] init];
+  NSString *path = [NSTemporaryDirectory ()
+      stringByAppendingPathComponent:@"nextemu-scsi-lun.img"];
+  NSMutableData *disk = [NSMutableData dataWithLength:512];
+  NXTUInt8 cdb[6] = { 0x12, 0x20, 0, 0, 54, 0 };
+  NXTUInt8 status = 0;
+  unsigned int index;
+
+  [disk writeToFile:path atomically:YES];
+  [memory resetNeXTDevicesForTurbo:YES];
+  NXTAssert ([memory attachSCSIDiskAtPath:path error:NULL],
+             "attaches the SCSI LUN test image");
+  [memory writeByte:0 atAddress:0x02014004U];
+  for (index = 0; index < sizeof (cdb); index++)
+    [memory writeByte:cdb[index] atAddress:0x02014002U];
+  [memory writeByte:0x41 atAddress:0x02014003U];
+  [memory writeByte:0x11 atAddress:0x02014003U];
+  [memory readByte:&status atAddress:0x02014002U];
+  NXTAssert (status == 0,
+             "reports a nonzero SCSI LUN as absent without failing inquiry");
+  [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
   [memory release];
 }
 
@@ -549,6 +588,7 @@ main (void)
   NXTTestSCCLocalLoopback ();
   NXTTestGenericDMAControlStatus ();
   NXTTestSCSISelectionFailureInterrupt ();
+  NXTTestSCSINonzeroLUN ();
   NXTTestCompareMemoryPostincrement ();
   NXTTestImmediateBitMemoryDisplacement ();
   if (failures == 0)

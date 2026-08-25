@@ -249,9 +249,18 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (_scsiFile == nil || (_espRegisters[4] & 7) != 0)
     {
       _espInterrupt = 0x20;
-      _interruptStatus |= NXT_INTR_SCSI_DMA;
+      _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
       _scsiInterruptDelay = 10;
       _scsiPhase = 3;
+      return;
+    }
+  if ((cdb[1] & 0xe0U) != 0 && cdb[0] != 0x12)
+    {
+      [self setSCSIResponse:nil phase:3 status:2];
+      _espRegisters[6] = 4;
+      _espInterrupt = 0x18;
+      _interruptStatus |= NXT_INTR_SCSI;
+      _scsiInterruptDelay = 10;
       return;
     }
   switch (cdb[0])
@@ -278,12 +287,14 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       }
     case 0x12:
       {
-        static const NXTUInt8 inquiry[54]
+        NXTUInt8 inquiry[54]
             = { 0,   0,   1,   2,   49,  0,   0,   0x1c, 'N', 'e', 'X',
                 'T', ' ', ' ', ' ', ' ', 'H', 'D', ' ',  ' ', ' ', ' ',
                 ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', '1',
                 '.', '0', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', ' ',
                 ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ' };
+        if ((cdb[1] & 0xe0U) != 0)
+          inquiry[0] = 0x7f;
         allocation = cdb[4];
         if (allocation > sizeof (inquiry))
           allocation = sizeof (inquiry);
@@ -311,15 +322,21 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       }
     case 0x1a:
       {
-        NXTUInt8 mode[12];
+        NXTUInt8 mode[16];
         NXTUInt32 sectors = (NXTUInt32)(_scsiSize / 512U);
         memset (mode, 0, sizeof (mode));
-        mode[0] = 11;
+        mode[0] = 15;
         mode[3] = 8;
         mode[5] = sectors >> 16;
         mode[6] = sectors >> 8;
         mode[7] = sectors;
         mode[10] = 2;
+        /* NeXT's disk driver requests the vendor-neutral operating page
+           during discovery.  The usage bit identifies a direct-access
+           device and is part of the response used to accept the drive. */
+        mode[12] = 0;
+        mode[13] = 2;
+        mode[14] = 0x80;
         allocation = cdb[4];
         if (allocation > sizeof (mode))
           allocation = sizeof (mode);
@@ -404,7 +421,9 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       _scsiPhase = 3;
     }
   else
-    amount = 0;
+    {
+      amount = 0;
+    }
   _dmaRegisters[4] = address + amount;
 #ifdef NXT_TRACE_SCSI
   fprintf (stderr,

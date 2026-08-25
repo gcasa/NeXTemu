@@ -749,38 +749,100 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       unsigned int fpRegister;
       if (![self fetchWord:&extension])
         return [self fail:NXTProcessorResultBusError];
+      if ((extension & 0xe000U) == 0xc000U || (extension & 0xe000U) == 0xe000U)
+        { /* FMOVEM.X <ea>,FP0-FP7 and the reverse transfer */
+          NXTUInt32 fpAddress;
+          unsigned int fpIndex;
+
+          sourceMode = (opcode >> 3) & 7U;
+          sourceRegister = opcode & 7U;
+          registerMask = extension & 0xffU;
+          if (![self effectiveAddress:&fpAddress
+                                 mode:sourceMode
+                             register:sourceRegister
+                                 size:12
+                              writing:(extension & 0x2000U) != 0])
+            return [self fail:NXTProcessorResultBusError];
+          for (fpIndex = 0; fpIndex < 8; fpIndex++)
+            {
+              if ((registerMask & (1U << fpIndex)) == 0)
+                continue;
+              for (byteIndex = 0; byteIndex < 12; byteIndex++)
+                {
+                  if ((extension & 0x2000U) == 0)
+                    {
+                      if ([_memory readByte:&_fpRegisters[fpIndex][byteIndex]
+                                  atAddress:fpAddress++]
+                          != NXTMemoryResultOK)
+                        return [self fail:NXTProcessorResultBusError];
+                    }
+                  else if ([_memory writeByte:_fpRegisters[fpIndex][byteIndex]
+                                    atAddress:fpAddress++]
+                           != NXTMemoryResultOK)
+                    return [self fail:NXTProcessorResultBusError];
+                }
+            }
+          return NXTProcessorResultOK;
+        }
       if ((extension & 0xe000U) == 0x8000U || (extension & 0xe000U) == 0xa000U)
         { /* FMOVE.L <ea>,FPcr/FPSR/FPIAR and the reverse transfer */
+          static const unsigned int controlBits[3] = { 4U, 2U, 1U };
+          NXTUInt32 *controlRegisters[3]
+              = { &_fpControlRegister, &_fpStatusRegister,
+                  &_fpInstructionAddressRegister };
+          unsigned int controlIndex;
+
           fpControlMask = (extension >> 10) & 7U;
-          if (fpControlMask != 1U && fpControlMask != 2U
-              && fpControlMask != 4U)
+          if (fpControlMask == 0)
             return [self fail:NXTProcessorResultIllegalInstruction];
           sourceMode = (opcode >> 3) & 7U;
           sourceRegister = opcode & 7U;
-          if ((extension & 0x2000U) == 0)
+          if (sourceMode <= 1)
             {
-              if (![self readEA:&value
-                           mode:sourceMode
-                       register:sourceRegister
-                           size:4])
+              if (fpControlMask != 1U && fpControlMask != 2U
+                  && fpControlMask != 4U)
+                return [self fail:NXTProcessorResultIllegalInstruction];
+              controlIndex = fpControlMask == 4U   ? 0
+                             : fpControlMask == 2U ? 1
+                                                   : 2;
+              if ((extension & 0x2000U) == 0)
+                {
+                  if (![self readEA:&value
+                               mode:sourceMode
+                           register:sourceRegister
+                               size:4])
+                    return [self fail:NXTProcessorResultBusError];
+                  *controlRegisters[controlIndex] = value;
+                }
+              else if (![self writeEA:*controlRegisters[controlIndex]
+                                 mode:sourceMode
+                             register:sourceRegister
+                                 size:4])
                 return [self fail:NXTProcessorResultBusError];
-              if (fpControlMask == 4U)
-                _fpControlRegister = value;
-              else if (fpControlMask == 2U)
-                _fpStatusRegister = value;
-              else
-                _fpInstructionAddressRegister = value;
+              return NXTProcessorResultOK;
             }
-          else
+          if (![self effectiveAddress:&address
+                                 mode:sourceMode
+                             register:sourceRegister
+                                 size:4
+                              writing:(extension & 0x2000U) != 0])
+            return [self fail:NXTProcessorResultBusError];
+          for (controlIndex = 0; controlIndex < 3; controlIndex++)
             {
-              value = fpControlMask == 4U   ? _fpControlRegister
-                      : fpControlMask == 2U ? _fpStatusRegister
-                                            : _fpInstructionAddressRegister;
-              if (![self writeEA:value
-                            mode:sourceMode
-                        register:sourceRegister
-                            size:4])
+              if ((fpControlMask & controlBits[controlIndex]) == 0)
+                continue;
+              if ((extension & 0x2000U) == 0)
+                {
+                  if (![self readSized:controlRegisters[controlIndex]
+                               address:address
+                                  size:4])
+                    return [self fail:NXTProcessorResultBusError];
+                }
+              else if (![self writeSized:*controlRegisters[controlIndex]
+                                 address:address
+                                    size:4])
                 return [self fail:NXTProcessorResultBusError];
+              address += 4;
             }
           return NXTProcessorResultOK;
         }
