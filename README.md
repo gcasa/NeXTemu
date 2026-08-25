@@ -49,6 +49,10 @@ Objective-C collection literals, subscripting, fast enumeration, lightweight
 generics, nullability annotations, class extensions, and modern-runtime-only
 features. Ownership follows manual retain/release rules.
 
+## Screenshot
+
+<img width="828" height="720" alt="progress" src="https://github.com/user-attachments/assets/55e78102-af77-4911-b133-2897569195c8" />
+
 ## Firmware
 
 No NeXT firmware is included. Firmware startup requires the user to provide a
