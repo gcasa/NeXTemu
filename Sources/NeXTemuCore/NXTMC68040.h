@@ -34,6 +34,7 @@ typedef enum {
     NXTUInt8 _fpRegisters[8][12];
     double _fpValues[8];
     BOOL _fpComparisonEqual;
+    BOOL _kernelEventCounterMode;
 }
 
 - (id)initWithMemory:(NXTMemory *)memory;

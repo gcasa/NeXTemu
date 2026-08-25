@@ -28,6 +28,7 @@
     NSMutableArray *_regions;
     NXTUInt32 _eventCounter;
     NXTUInt32 _eventLatch;
+    BOOL _kernelEventCounterMode;
     NXTUInt32 _scr2Value;
     NXTUInt8 _rtcRegisters[64];
     NXTUInt32 _rtcSeconds;
@@ -81,6 +82,7 @@
 - (NXTMemoryResult)loadData:(NSData *)data atAddress:(NXTUInt32)address;
 - (void)resetNeXTDevicesForTurbo:(BOOL)turbo;
 - (void)setVerboseBoot:(BOOL)verbose;
+- (void)setKernelEventCounterMode;
 - (unsigned int)pendingInterruptLevel;
 - (BOOL)attachSCSIDiskAtPath:(NSString *)path error:(NSString **)errorMessage;
 

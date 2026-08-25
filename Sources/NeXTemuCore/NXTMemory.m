@@ -333,6 +333,7 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     memset(_sccReceiveAvailable, 0, sizeof(_sccReceiveAvailable));
     _interruptStatus = 0;
     _interruptMask = 0;
+    _kernelEventCounterMode = NO;
     _scsiInterruptDelay = 0;
     _hardclockStaging = 0;
     _hardclockReload = 0;
@@ -344,6 +345,11 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
 - (void)setVerboseBoot:(BOOL)verbose
 {
     _verboseBoot = verbose;
+}
+
+- (void)setKernelEventCounterMode
+{
+    _kernelEventCounterMode = YES;
 }
 
 - (unsigned int)pendingInterruptLevel
@@ -579,10 +585,16 @@ static void NXTTraceMMIO(NXTUInt32 address, BOOL writing, NXTUInt32 size)
     }
     if (canonical >= 0x0201a000U && canonical <= 0x0201a003U) {
         if ((canonical & 3) == 0) {
-            /* Advance in small quanta; ROM delay calibration performs
-               several counter reads per millisecond interval. */
-            _eventCounter += 200;
-            _eventLatch = (_eventCounter / 30U) * 5U;
+            if (_kernelEventCounterMode) {
+                /* The kernel consumes the native 20-bit counter and compares
+                   a complete sample against a 1000-iteration baseline. */
+                _eventCounter = (_eventCounter + 2048U) & 0x000fffffU;
+                _eventLatch = _eventCounter;
+            } else {
+                /* ROM POST uses the slower board-test calibration scale. */
+                _eventCounter += 200U;
+                _eventLatch = (_eventCounter / 30U) * 5U;
+            }
         }
         *value = (NXTUInt8)(_eventLatch >> ((3 - (canonical & 3)) * 8));
         return NXTMemoryResultOK;

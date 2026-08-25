@@ -66,6 +66,7 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
     memset(_fpRegisters, 0, sizeof(_fpRegisters));
     memset(_fpValues, 0, sizeof(_fpValues));
     _fpComparisonEqual = NO;
+    _kernelEventCounterMode = NO;
     _statusRegister = 0x2700;
     if ([_memory readLong:&initialStackPointer atAddress:0] != NXTMemoryResultOK ||
         [_memory readLong:&initialProgramCounter atAddress:4] != NXTMemoryResultOK) {
@@ -458,6 +459,11 @@ static BOOL NXTConditionTrue(NXTUInt16 condition, NXTUInt16 sr)
         }
     }
 
+    if (!_kernelEventCounterMode && _programCounter >= 0x04000000U &&
+        _programCounter < 0x10000000U) {
+        [_memory setKernelEventCounterMode];
+        _kernelEventCounterMode = YES;
+    }
     interruptLevel = [_memory pendingInterruptLevel];
     if (interruptLevel > ((_statusRegister >> 8) & 7U)) {
         NXTUInt16 savedStatus = _statusRegister;
