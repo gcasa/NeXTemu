@@ -1,0 +1,7 @@
+BasedOnStyle: GNU
+ColumnLimit: 79
+IndentWidth: 2
+TabWidth: 8
+UseTab: Never
+PointerAlignment: Right
+SortIncludes: Never
