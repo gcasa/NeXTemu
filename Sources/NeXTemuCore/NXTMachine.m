@@ -75,6 +75,8 @@ NXTAddRegisterBank (NXTMemory *memory, NXTUInt32 base, NXTUInt32 length)
           || /* system */
           !NXTAddRegisterBank (_memory, 0x0200e000U, 0x00000020U)
           || /* keyboard */
+          !NXTAddRegisterBank (_memory, 0x0200f000U, 0x00001000U)
+          || /* peripheral probe window */
           !NXTAddRegisterBank (_memory, 0x020c0000U, 0x00000040U) || /* BMAP */
           !NXTAddRegisterBank (_memory, 0x02100000U, 0x00000020U)
           || /* ethernet */
@@ -95,8 +97,8 @@ NXTAddRegisterBank (NXTMemory *memory, NXTUInt32 base, NXTUInt32 length)
           || /* Turbo slot */
           !NXTAddRegisterBank (_memory, 0x03e00000U, 0x00200000U)
           || /* low DMA pages */
-          !NXTAddRegisterBank (_memory, 0x10000000U, 0x01000000U)
-          || /* kernel device map */
+          !NXTAddRegisterBank (_memory, 0x10000000U, 0x02000000U)
+          || /* kernel virtual-allocation map */
           !NXTAddRegisterBank (_memory,
                                model == NXTMachineModelNeXTcubeTurbo
                                    ? 0x0c000000U

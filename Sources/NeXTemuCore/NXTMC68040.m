@@ -111,6 +111,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
   memset (_addressRegisters, 0, sizeof (_addressRegisters));
   memset (_fpRegisters, 0, sizeof (_fpRegisters));
   memset (_fpValues, 0, sizeof (_fpValues));
+  _fpControlRegister = 0;
+  _fpStatusRegister = 0;
+  _fpInstructionAddressRegister = 0;
   _fpComparisonEqual = NO;
   _kernelEventCounterMode = NO;
   _statusRegister = 0x2700;
@@ -570,6 +573,7 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
   NXTUInt64 wideDividend;
   NXTUInt64 wideResult;
   unsigned int interruptLevel;
+  unsigned int fpControlMask;
 
   /* NeXT's early kernel checksums the entire physical RAM with a tight
      MOVE.W/ADD.L/DBF loop.  Interpreting four instructions per word makes
@@ -740,11 +744,46 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
     }
   if (!NXTIsFirmwareFPUPostAddress (_lastOpcodeAddress)
       && (opcode & 0xffc0U) == 0xf200U && opcode != 0xf203 && opcode != 0xf204
-      && opcode != 0xf21f && opcode != 0xf227)
+      && opcode != 0xf21f && opcode != 0xf227 && opcode != 0xf23c)
     {
       unsigned int fpRegister;
       if (![self fetchWord:&extension])
         return [self fail:NXTProcessorResultBusError];
+      if ((extension & 0xe000U) == 0x8000U || (extension & 0xe000U) == 0xa000U)
+        { /* FMOVE.L <ea>,FPcr/FPSR/FPIAR and the reverse transfer */
+          fpControlMask = (extension >> 10) & 7U;
+          if (fpControlMask != 1U && fpControlMask != 2U
+              && fpControlMask != 4U)
+            return [self fail:NXTProcessorResultIllegalInstruction];
+          sourceMode = (opcode >> 3) & 7U;
+          sourceRegister = opcode & 7U;
+          if ((extension & 0x2000U) == 0)
+            {
+              if (![self readEA:&value
+                           mode:sourceMode
+                       register:sourceRegister
+                           size:4])
+                return [self fail:NXTProcessorResultBusError];
+              if (fpControlMask == 4U)
+                _fpControlRegister = value;
+              else if (fpControlMask == 2U)
+                _fpStatusRegister = value;
+              else
+                _fpInstructionAddressRegister = value;
+            }
+          else
+            {
+              value = fpControlMask == 4U   ? _fpControlRegister
+                      : fpControlMask == 2U ? _fpStatusRegister
+                                            : _fpInstructionAddressRegister;
+              if (![self writeEA:value
+                            mode:sourceMode
+                        register:sourceRegister
+                            size:4])
+                return [self fail:NXTProcessorResultBusError];
+            }
+          return NXTProcessorResultOK;
+        }
       fpRegister = (extension >> 7) & 7U;
       sourceMode = (opcode >> 3) & 7U;
       sourceRegister = opcode & 7U;
@@ -873,8 +912,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
         }
       return NXTProcessorResultOK;
     }
-  if (NXTIsFirmwareFPUPostAddress (_lastOpcodeAddress)
-      && (opcode & 0xf000U) == 0xf000U)
+  if ((NXTIsFirmwareFPUPostAddress (_lastOpcodeAddress)
+       && (opcode & 0xf000U) == 0xf000U)
+      || opcode == 0xf23c)
     {
       union
       {
@@ -1030,16 +1070,24 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       destinationRegister = opcode & 7;
       size = destinationMode == 0 ? 4 : 1;
       immediateValue = extension & (destinationMode == 0 ? 31U : 7U);
-      if (![self readEA:&value
-                   mode:destinationMode
-               register:destinationRegister
-                   size:size])
-        return [self fail:NXTProcessorResultBusError];
+      operation = (opcode >> 6) & 3;
+      if (destinationMode == 0)
+        value = [self maskedValue:_dataRegisters[destinationRegister]
+                             size:size];
+      else
+        {
+          if (![self effectiveAddress:&address
+                                 mode:destinationMode
+                             register:destinationRegister
+                                 size:size
+                              writing:operation != 0]
+              || ![self readSized:&value address:address size:size])
+            return [self fail:NXTProcessorResultBusError];
+        }
       if ((value & (1U << immediateValue)) == 0)
         _statusRegister |= NXT_SR_Z;
       else
         _statusRegister &= (NXTUInt16)~NXT_SR_Z;
-      operation = (opcode >> 6) & 3;
       if (operation == 0)
         return NXTProcessorResultOK;
       if (operation == 1)
@@ -1048,10 +1096,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
         value &= ~(1U << immediateValue);
       else
         value |= 1U << immediateValue;
-      if (![self writeEA:value
-                    mode:destinationMode
-                register:destinationRegister
-                    size:size])
+      if (destinationMode == 0)
+        _dataRegisters[destinationRegister] = value;
+      else if (![self writeSized:value address:address size:size])
         return [self fail:NXTProcessorResultBusError];
       return NXTProcessorResultOK;
     }

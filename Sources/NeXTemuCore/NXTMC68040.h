@@ -55,6 +55,9 @@ typedef enum
   NXTUInt32 _supervisorRootPointer;
   NXTUInt8 _fpRegisters[8][12];
   double _fpValues[8];
+  NXTUInt32 _fpControlRegister;
+  NXTUInt32 _fpStatusRegister;
+  NXTUInt32 _fpInstructionAddressRegister;
   BOOL _fpComparisonEqual;
   BOOL _kernelEventCounterMode;
 }

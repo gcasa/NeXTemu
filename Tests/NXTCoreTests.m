@@ -142,6 +142,7 @@ NXTTestMachineROMAliases (void)
   NXTUInt8 *bytes;
   NXTUInt32 low;
   NXTUInt32 high;
+  NXTUInt8 peripheralValue;
 
   machine = [[NXTMachine alloc] initWithModel:NXTMachineModelNeXTcube
                                       ramSize:16U * 1024U * 1024U];
@@ -166,6 +167,12 @@ NXTTestMachineROMAliases (void)
              "maps ROM at its runtime address");
   NXTAssert (low == high && low == 0x04001000,
              "ROM aliases contain identical data");
+  NXTAssert ([[machine memory] readByte:&peripheralValue atAddress:0x0200f807U]
+                 == NXTMemoryResultOK,
+             "maps the kernel peripheral-probe window");
+  NXTAssert ([[machine memory] writeLong:0x12345678U atAddress:0x11846008U]
+                 == NXTMemoryResultOK,
+             "maps the kernel virtual-allocation window");
   NXTAssert ([machine reset] &&
                  [[machine processor] programCounter] == 0x01000008,
              "resets into the high ROM alias");
@@ -343,6 +350,45 @@ NXTTestFMoveLong (void)
 }
 
 static void
+NXTTestFMoveControlRegister (void)
+{
+  NXTMemory *memory;
+  NXTMemoryRegion *image, *stack;
+  NXTMC68040 *processor;
+  NXTUInt8 vectors[8] = { 0, 0, 0x20, 0, 0, 0, 1, 0 };
+  NXTUInt8 code[] = {
+    0x24, 0x3c, 0x12, 0x34, 0x56, 0x78, /* MOVE.L #$12345678,D2 */
+    0xf2, 0x02, 0x90, 0x00,             /* FMOVE.L D2,FPCR */
+    0xf2, 0x01, 0xb0, 0x00,             /* FMOVE.L FPCR,D1 */
+    0x4e, 0x72, 0x27, 0x00              /* STOP #$2700 */
+  };
+
+  memory = [[NXTMemory alloc] init];
+  image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
+                                                length:0x200
+                                              readOnly:YES];
+  stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1f00
+                                                length:0x100
+                                              readOnly:NO];
+  [memory addRegion:image];
+  [memory addRegion:stack];
+  [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+  [memory loadData:[NSData dataWithBytes:code length:sizeof (code)]
+         atAddress:0x100];
+  processor = [[NXTMC68040 alloc] initWithMemory:memory];
+  NXTAssert ([processor reset], "resets FP control-register test");
+  NXTAssert ([processor runForInstructionCount:10]
+                 == NXTProcessorResultStopped,
+             "executes FPCR transfers");
+  NXTAssert ([processor dataRegister:1] == 0x12345678,
+             "round-trips FPCR through a data register");
+  [processor release];
+  [stack release];
+  [image release];
+  [memory release];
+}
+
+static void
 NXTTestSCCLocalLoopback (void)
 {
   NXTMemory *memory = [[NXTMemory alloc] init];
@@ -445,6 +491,47 @@ NXTTestCompareMemoryPostincrement (void)
   [memory release];
 }
 
+static void
+NXTTestImmediateBitMemoryDisplacement (void)
+{
+  NXTMemory *memory;
+  NXTMemoryRegion *image, *ram;
+  NXTMC68040 *processor;
+  NXTUInt8 vectors[8] = { 0, 0, 0x20, 0, 0, 0, 1, 0 };
+  NXTUInt8 code[] = {
+    0x20, 0x7c, 0,    0,   0x10, 0x00, /* MOVEA.L #$1000,A0 */
+    0x08, 0xe8, 0,    4,   0,    0x54, /* BSET #4,$54(A0) */
+    0x4e, 0x72, 0x27, 0x00             /* STOP #$2700 */
+  };
+  NXTUInt8 value = 0;
+
+  memory = [[NXTMemory alloc] init];
+  image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
+                                                length:0x200
+                                              readOnly:YES];
+  ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000
+                                              length:0x100
+                                            readOnly:NO];
+  [memory addRegion:image];
+  [memory addRegion:ram];
+  [memory loadData:[NSData dataWithBytes:vectors length:8] atAddress:0];
+  [memory loadData:[NSData dataWithBytes:code length:sizeof (code)]
+         atAddress:0x100];
+  processor = [[NXTMC68040 alloc] initWithMemory:memory];
+  NXTAssert ([processor reset], "resets immediate bit-operation test");
+  NXTAssert ([processor step] == NXTProcessorResultOK &&
+                 [processor step] == NXTProcessorResultOK,
+             "executes BSET with address displacement");
+  [memory readByte:&value atAddress:0x1054];
+  NXTAssert ([processor programCounter] == 0x10c,
+             "decodes the BSET effective address only once");
+  NXTAssert (value == 0x10, "sets the selected memory bit");
+  [processor release];
+  [ram release];
+  [image release];
+  [memory release];
+}
+
 int
 main (void)
 {
@@ -458,10 +545,12 @@ main (void)
   NXTTestExtendedBranches ();
   NXTTestImmediateCompareCarry ();
   NXTTestFMoveLong ();
+  NXTTestFMoveControlRegister ();
   NXTTestSCCLocalLoopback ();
   NXTTestGenericDMAControlStatus ();
   NXTTestSCSISelectionFailureInterrupt ();
   NXTTestCompareMemoryPostincrement ();
+  NXTTestImmediateBitMemoryDisplacement ();
   if (failures == 0)
     printf ("All core tests passed.\n");
   [pool drain];
