@@ -2,3 +2,5 @@
 build
 .DS_Store
 HD/*.img
+*.img
+roms/*.bin
