@@ -494,8 +494,96 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
   return result;
 }
 
+- (void)setStatusRegisterWithStackSwitch:(NXTUInt16)value
+{
+  unsigned int oldStack
+      = (_statusRegister & 0x2000U) == 0
+            ? 0U
+            : ((_statusRegister & 0x1000U) != 0 ? 2U : 1U);
+  unsigned int newStack = (value & 0x2000U) == 0
+                              ? 0U
+                              : ((value & 0x1000U) != 0 ? 2U : 1U);
+
+  if (oldStack != newStack)
+    {
+      if (oldStack == 0U)
+        _userStackPointer = _addressRegisters[7];
+      else if (oldStack == 1U)
+        _interruptStackPointer = _addressRegisters[7];
+      else
+        _masterStackPointer = _addressRegisters[7];
+      _addressRegisters[7] = newStack == 0U   ? _userStackPointer
+                             : newStack == 1U ? _interruptStackPointer
+                                              : _masterStackPointer;
+    }
+  _statusRegister = value;
+}
+
+- (NXTProcessorResult)raiseAccessErrorAtAddress:(NXTUInt32)faultAddress
+                                  programCounter:(NXTUInt32)faultProgramCounter
+                                            size:(unsigned int)faultSize
+                                         writing:(BOOL)writing
+                                    functionCode:(NXTUInt32)functionCode
+{
+  NXTUInt16 savedStatus = _statusRegister;
+  NXTUInt16 specialStatus;
+  NXTUInt32 frameAddress;
+  NXTUInt32 handler;
+  unsigned int offset;
+  if ((_statusRegister & 0x2000U) == 0)
+    {
+      _userStackPointer = _addressRegisters[7];
+      _addressRegisters[7] = _interruptStackPointer;
+    }
+  /* Synchronous exceptions retain the current supervisor stack.  Only
+     interrupt exception processing moves a master-mode CPU to the ISP. */
+  _statusRegister |= 0x2000U;
+  frameAddress = _addressRegisters[7] - 60U;
+  _addressRegisters[7] = frameAddress;
+  /* 68040 format-7 access-error frame.  The kernel's copyin/copyout fault
+     recovery examines the SSW and fault-address fields before discarding
+     the complete 60-byte frame. */
+  /* MOVES reaches this path after an MMU translation failure, so identify
+     the fault as an ATC fault rather than an external physical-bus error. */
+  specialStatus = (NXTUInt16)(0x0400U | (functionCode & 7U));
+  if (!writing)
+    specialStatus |= 0x0100U;
+  /* SSW SIZE is 00=byte, 01=word, 10=long, and 11=line. */
+  specialStatus |= faultSize == 2 ? 0x0020U
+                                  : (faultSize == 4 ? 0x0040U : 0);
+  for (offset = 0; offset < 60U; offset += 2U)
+    if ([_memory writeWord:0 atAddress:frameAddress + offset]
+        != NXTMemoryResultOK)
+      return [self fail:NXTProcessorResultBusError];
+  if ([_memory writeWord:savedStatus atAddress:frameAddress]
+          != NXTMemoryResultOK
+      || [_memory writeLong:faultProgramCounter atAddress:frameAddress + 2U]
+             != NXTMemoryResultOK
+      || [_memory writeWord:0x7008U atAddress:frameAddress + 6U]
+             != NXTMemoryResultOK
+      || [_memory writeLong:faultAddress atAddress:frameAddress + 8U]
+             != NXTMemoryResultOK
+      || [_memory writeWord:specialStatus atAddress:frameAddress + 12U]
+             != NXTMemoryResultOK
+      || [_memory writeLong:faultAddress atAddress:frameAddress + 20U]
+             != NXTMemoryResultOK
+      || [_memory readLong:&handler atAddress:_vectorBaseRegister + 8U]
+             != NXTMemoryResultOK)
+    return [self fail:NXTProcessorResultBusError];
+  if ((_statusRegister & 0x1000U) != 0)
+    _masterStackPointer = _addressRegisters[7];
+  else
+    _interruptStackPointer = _addressRegisters[7];
+  _programCounter = handler;
+  return NXTProcessorResultOK;
+}
+
 - (NXTUInt32)controlRegister:(NXTUInt16)number
 {
+  if (number == 0x000)
+    return _sourceFunctionCode;
+  if (number == 0x001)
+    return _destinationFunctionCode;
   if (number == 0x003)
     return _translationControl;
   if (number == 0x800)
@@ -515,7 +603,11 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
 
 - (void)setControlRegister:(NXTUInt16)number value:(NXTUInt32)value
 {
-  if (number == 0x003)
+  if (number == 0x000)
+    _sourceFunctionCode = value & 7U;
+  else if (number == 0x001)
+    _destinationFunctionCode = value & 7U;
+  else if (number == 0x003)
     _translationControl = value;
   else if (number == 0x800)
     _userStackPointer = value;
@@ -529,6 +621,10 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
     _userRootPointer = value;
   else if (number == 0x807)
     _supervisorRootPointer = value;
+  if (number == 0x003 || number == 0x806 || number == 0x807)
+    [_memory setMMUTranslationControl:_translationControl
+                      userRootPointer:_userRootPointer
+                supervisorRootPointer:_supervisorRootPointer];
 }
 
 - (NXTProcessorResult)step
@@ -660,7 +756,10 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                   atAddress:_vectorBaseRegister + (24U + interruptLevel) * 4U]
               != NXTMemoryResultOK)
         return [self fail:NXTProcessorResultBusError];
-      _interruptStackPointer = _addressRegisters[7];
+      if ((_statusRegister & 0x1000U) != 0)
+        _masterStackPointer = _addressRegisters[7];
+      else
+        _interruptStackPointer = _addressRegisters[7];
       _programCounter = handler;
     }
   if (_stopped)
@@ -1086,7 +1185,7 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
     { /* MOVE.W #imm,SR */
       if (![self fetchWord:&extension])
         return [self fail:NXTProcessorResultBusError];
-      _statusRegister = extension;
+      [self setStatusRegisterWithStackSwitch:extension];
       return NXTProcessorResultOK;
     }
   if ((opcode & 0xffc0) == 0x40c0 || (opcode & 0xffc0) == 0x42c0)
@@ -1109,7 +1208,7 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       if (![self readEA:&value mode:sourceMode register:sourceRegister size:2])
         return [self fail:NXTProcessorResultBusError];
       if ((opcode & 0x0200) != 0)
-        _statusRegister = (NXTUInt16)value;
+        [self setStatusRegisterWithStackSwitch:(NXTUInt16)value];
       else
         _statusRegister = (_statusRegister & 0xff00U) | (value & 0xffU);
       return NXTProcessorResultOK;
@@ -1119,9 +1218,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       if (![self fetchWord:&extension])
         return [self fail:NXTProcessorResultBusError];
       if (opcode == 0x007c)
-        _statusRegister |= extension;
+        [self setStatusRegisterWithStackSwitch:_statusRegister | extension];
       else
-        _statusRegister &= extension;
+        [self setStatusRegisterWithStackSwitch:_statusRegister & extension];
       return NXTProcessorResultOK;
     }
   if ((opcode & 0xff00) == 0x0800)
@@ -1242,7 +1341,7 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
     { /* STOP */
       if (![self fetchWord:&extension])
         return [self fail:NXTProcessorResultBusError];
-      _statusRegister = extension;
+      [self setStatusRegisterWithStackSwitch:extension];
       _stopped = YES;
       _lastResult = NXTProcessorResultStopped;
       return _lastResult;
@@ -1255,19 +1354,15 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       return NXTProcessorResultOK;
     }
   if (opcode == 0x4e73)
-    { /* RTE, format-0 exception frame */
+    { /* RTE */
       NXTUInt16 restoredStatus, frame;
       if (![self popWord:&restoredStatus] || ![self popLong:&value]
           || ![self popWord:&frame])
         return [self fail:NXTProcessorResultBusError];
-      (void)frame;
-      _interruptStackPointer = _addressRegisters[7];
+      if ((frame >> 12) == 7U)
+        _addressRegisters[7] += 52U;
       _programCounter = value;
-      _statusRegister = restoredStatus;
-      if ((restoredStatus & 0x2000U) == 0)
-        _addressRegisters[7] = _userStackPointer;
-      else if ((restoredStatus & 0x1000U) != 0)
-        _addressRegisters[7] = _masterStackPointer;
+      [self setStatusRegisterWithStackSwitch:restoredStatus];
       return NXTProcessorResultOK;
     }
   if ((opcode & 0xfff8) == 0x4e50)
@@ -1735,6 +1830,95 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                    size:size])
         return [self fail:NXTProcessorResultBusError];
       [self setNZForValue:value size:size];
+      return NXTProcessorResultOK;
+    }
+  if ((opcode & 0xff00U) == 0x0e00U && ((opcode >> 6) & 3U) != 3U)
+    { /* MOVES */
+      BOOL registerToMemory;
+      BOOL addressRegister;
+      NXTMemoryResult memoryResult;
+
+      size = 1U << ((opcode >> 6) & 3U);
+      sourceMode = (opcode >> 3) & 7U;
+      sourceRegister = opcode & 7U;
+      if (![self fetchWord:&extension]
+          || ![self effectiveAddress:&address
+                                mode:sourceMode
+                            register:sourceRegister
+                                size:size
+                             writing:(extension & 0x0800U) != 0])
+        return [self fail:NXTProcessorResultBusError];
+      registerIndex = (extension >> 12) & 7U;
+      addressRegister = (extension & 0x8000U) != 0;
+      registerToMemory = (extension & 0x0800U) != 0;
+      if (registerToMemory)
+        {
+          value = addressRegister ? _addressRegisters[registerIndex]
+                                  : _dataRegisters[registerIndex];
+          if (_destinationFunctionCode == 1U)
+            memoryResult = size == 1
+                               ? [_memory writeByte:(NXTUInt8)value
+                                      atUserAddress:address]
+                               : (size == 2
+                                      ? [_memory writeWord:(NXTUInt16)value
+                                             atUserAddress:address]
+                                      : [_memory writeLong:value
+                                             atUserAddress:address]);
+          else
+            memoryResult = size == 1
+                               ? [_memory writeByte:(NXTUInt8)value
+                                         atAddress:address]
+                               : (size == 2
+                                      ? [_memory writeWord:(NXTUInt16)value
+                                                atAddress:address]
+                                      : [_memory writeLong:value
+                                                atAddress:address]);
+          if (memoryResult != NXTMemoryResultOK)
+            return [self raiseAccessErrorAtAddress:address
+                                    programCounter:_lastOpcodeAddress
+                                              size:size
+                                           writing:YES
+                                      functionCode:_destinationFunctionCode];
+        }
+      else
+        {
+          if (_sourceFunctionCode == 1U)
+            {
+              if (size == 1)
+                {
+                  memoryResult = [_memory readByte:&bitfieldByte
+                                      atUserAddress:address];
+                  value = bitfieldByte;
+                }
+              else if (size == 2)
+                {
+                  memoryResult = [_memory readWord:&extension
+                                      atUserAddress:address];
+                  value = extension;
+                }
+              else
+                memoryResult = [_memory readLong:&value
+                                      atUserAddress:address];
+            }
+          else if (![self readSized:&value address:address size:size])
+            memoryResult = NXTMemoryResultUnmapped;
+          else
+            memoryResult = NXTMemoryResultOK;
+          if (memoryResult != NXTMemoryResultOK)
+            return [self raiseAccessErrorAtAddress:address
+                                    programCounter:_lastOpcodeAddress
+                                              size:size
+                                           writing:NO
+                                      functionCode:_sourceFunctionCode];
+          if (size == 1)
+            value &= 0xffU;
+          else if (size == 2)
+            value &= 0xffffU;
+          if (addressRegister)
+            _addressRegisters[registerIndex] = value;
+          else
+            _dataRegisters[registerIndex] = value;
+        }
       return NXTProcessorResultOK;
     }
   if ((opcode & 0xf138) == 0xb108 && ((opcode >> 6) & 3) != 3)

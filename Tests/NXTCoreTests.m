@@ -134,6 +134,56 @@ NXTTestInstructionExecution (void)
 }
 
 static void
+NXTTestMovesAlternateSpace (void)
+{
+  NXTMemory *memory;
+  NXTMemoryRegion *image;
+  NXTMemoryRegion *ram;
+  NXTMC68040 *processor;
+  NXTUInt32 value = 0;
+  NXTUInt8 vectors[8] = { 0x00, 0x00, 0x20, 0x00,
+                          0x00, 0x00, 0x01, 0x00 };
+  NXTUInt8 code[] = {
+    0x20, 0x7c, 0x00, 0x00, 0x10, 0x00, /* MOVEA.L #$1000,A0 */
+    0x22, 0x3c, 0x12, 0x34, 0x56, 0x78, /* MOVE.L #value,D1 */
+    0x70, 0x01,                         /* MOVEQ #1,D0 */
+    0x4e, 0x7b, 0x00, 0x01,             /* MOVEC D0,DFC */
+    0x0e, 0x90, 0x18, 0x00,             /* MOVES.L D1,(A0) */
+    0x4e, 0x7b, 0x00, 0x00,             /* MOVEC D0,SFC */
+    0x0e, 0x90, 0x20, 0x00,             /* MOVES.L (A0),D2 */
+    0x4e, 0x72, 0x27, 0x00              /* STOP #$2700 */
+  };
+
+  memory = [[NXTMemory alloc] init];
+  image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
+                                                length:0x200
+                                              readOnly:YES];
+  ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000
+                                              length:0x1000
+                                            readOnly:NO];
+  [memory addRegion:image];
+  [memory addRegion:ram];
+  [memory loadData:[NSData dataWithBytes:vectors length:sizeof (vectors)]
+         atAddress:0];
+  [memory loadData:[NSData dataWithBytes:code length:sizeof (code)]
+         atAddress:0x100];
+  processor = [[NXTMC68040 alloc] initWithMemory:memory];
+  NXTAssert ([processor reset], "resets MOVES instruction test");
+  NXTAssert ([processor runForInstructionCount:20]
+                 == NXTProcessorResultStopped,
+             "executes MOVES in both directions");
+  [memory readLong:&value atAddress:0x1000];
+  NXTAssert (value == 0x12345678U,
+             "MOVES writes through the destination function code");
+  NXTAssert ([processor dataRegister:2] == 0x12345678U,
+             "MOVES reads through the source function code");
+  [processor release];
+  [ram release];
+  [image release];
+  [memory release];
+}
+
+static void
 NXTTestMachineROMAliases (void)
 {
   NXTMachine *machine;
@@ -178,6 +228,65 @@ NXTTestMachineROMAliases (void)
              "resets into the high ROM alias");
   [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
   [machine release];
+}
+
+static void
+NXTTestMovesAccessErrorFrame (void)
+{
+  NXTMemory *memory;
+  NXTMemoryRegion *image;
+  NXTMemoryRegion *ram;
+  NXTMC68040 *processor;
+  NXTUInt16 format = 0;
+  NXTUInt16 specialStatus = 0;
+  NXTUInt32 faultAddress = 0;
+  NXTUInt8 imageBytes[0x200] = { 0 };
+  NXTUInt8 code[] = {
+    0x70, 0x01,                         /* MOVEQ #1,D0 */
+    0x4e, 0x7b, 0x00, 0x01,             /* MOVEC D0,DFC */
+    0x20, 0x7c, 0x00, 0x00, 0x30, 0x00, /* MOVEA.L #$3000,A0 */
+    0x72, 0x01,                         /* MOVEQ #1,D1 */
+    0x0e, 0x90, 0x18, 0x00              /* MOVES.L D1,(A0) */
+  };
+
+  imageBytes[0] = 0x00;
+  imageBytes[1] = 0x00;
+  imageBytes[2] = 0x21;
+  imageBytes[3] = 0x00;
+  imageBytes[6] = 0x01;
+  imageBytes[8] = 0x00;
+  imageBytes[9] = 0x00;
+  imageBytes[10] = 0x01;
+  imageBytes[11] = 0x80;
+  memcpy (imageBytes + 0x100, code, sizeof (code));
+  memory = [[NXTMemory alloc] init];
+  image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
+                                                length:sizeof (imageBytes)
+                                              readOnly:YES];
+  ram = [[NXTMemoryRegion alloc] initWithBaseAddress:0x2000
+                                              length:0x1000
+                                            readOnly:NO];
+  [memory addRegion:image];
+  [memory addRegion:ram];
+  [memory loadData:[NSData dataWithBytes:imageBytes length:sizeof (imageBytes)]
+         atAddress:0];
+  processor = [[NXTMC68040 alloc] initWithMemory:memory];
+  NXTAssert ([processor reset], "resets MOVES access-error test");
+  NXTAssert ([processor runForInstructionCount:5]
+                 == NXTProcessorResultInstructionLimit,
+             "vectors an invalid MOVES access");
+  [memory readWord:&format atAddress:0x20c4 + 6];
+  [memory readWord:&specialStatus atAddress:0x20c4 + 12];
+  [memory readLong:&faultAddress atAddress:0x20c4 + 20];
+  NXTAssert ([processor programCounter] == 0x180 && format == 0x7008U,
+             "builds a 68040 format-7 access-error frame");
+  NXTAssert ((specialStatus & 0x0767U) == 0x0441U
+                 && faultAddress == 0x3000U,
+             "records the ATC fault direction, space, and address");
+  [processor release];
+  [ram release];
+  [image release];
+  [memory release];
 }
 
 static void
@@ -442,6 +551,33 @@ NXTTestGenericDMAControlStatus (void)
 }
 
 static void
+NXTTestSCSIBusResetTiming (void)
+{
+  NXTMemory *memory = [[NXTMemory alloc] init];
+  NXTUInt32 interruptStatus = 0;
+  NXTUInt8 value = 0;
+  unsigned int tick;
+
+  [memory resetNeXTDevicesForTurbo:YES];
+  [memory writeByte:0x57 atAddress:0x02014008U];
+  [memory writeByte:0x03 atAddress:0x02014003U];
+  [memory readByte:&value atAddress:0x02014008U];
+  NXTAssert (value == 0x57,
+             "SCSI bus reset preserves the ESP configuration");
+  for (tick = 0; tick < 824U; tick++)
+    [memory pendingInterruptLevel];
+  [memory readByte:&value atAddress:0x02014005U];
+  NXTAssert (value == 0, "SCSI bus reset remains active for 25 microseconds");
+  [memory pendingInterruptLevel];
+  [memory readByte:&value atAddress:0x02014005U];
+  NXTAssert (value == 0x80, "SCSI bus reset latches reset completion");
+  [memory readLong:&interruptStatus atAddress:0x02007000U];
+  NXTAssert (interruptStatus == 0,
+             "ESP reset-report suppression prevents an external interrupt");
+  [memory release];
+}
+
+static void
 NXTTestSCSISelectionFailureInterrupt (void)
 {
   NXTMemory *memory = [[NXTMemory alloc] init];
@@ -579,6 +715,8 @@ main (void)
   NXTTestMemory ();
   NXTTestResetVectors ();
   NXTTestInstructionExecution ();
+  NXTTestMovesAlternateSpace ();
+  NXTTestMovesAccessErrorFrame ();
   NXTTestMachineROMAliases ();
   NXTTestEffectiveAddresses ();
   NXTTestExtendedBranches ();
@@ -587,6 +725,7 @@ main (void)
   NXTTestFMoveControlRegister ();
   NXTTestSCCLocalLoopback ();
   NXTTestGenericDMAControlStatus ();
+  NXTTestSCSIBusResetTiming ();
   NXTTestSCSISelectionFailureInterrupt ();
   NXTTestSCSINonzeroLUN ();
   NXTTestCompareMemoryPostincrement ();

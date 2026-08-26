@@ -56,6 +56,10 @@
   NXTUInt32 _eventCounter;
   NXTUInt32 _eventLatch;
   BOOL _kernelEventCounterMode;
+  NXTUInt32 _mmuTranslationControl;
+  NXTUInt32 _mmuUserRootPointer;
+  NXTUInt32 _mmuSupervisorRootPointer;
+  BOOL _mmuBypassTranslation;
   NXTUInt32 _scr2Value;
   NXTUInt8 _rtcRegisters[64];
   NXTUInt32 _rtcSeconds;
@@ -73,8 +77,14 @@
   NXTUInt8 _espFIFO[32];
   unsigned int _espFIFOCount;
   NXTUInt8 _espInterrupt;
+  NXTUInt8 _espDMAControl;
+  NXTUInt8 _scsiDMAPack[16];
+  unsigned int _scsiDMAPackSize;
   NXTUInt8 _scsiPhase;
   NXTUInt8 _scsiStatus;
+  BOOL _scsiSelectionTimeout;
+  BOOL _scsiBusResetPending;
+  NXTUInt32 _scsiBusResetDelay;
   NSData *_scsiData;
   NSUInteger _scsiDataOffset;
   NXTUInt32 _dmaRegisters[9];
@@ -122,6 +132,24 @@
 - (void)setVerboseBoot:(BOOL)verbose;
 /** Selects the kernel-compatible event-counter behavior. */
 - (void)setKernelEventCounterMode;
+/** Updates the supervisor MMU registers used for kernel virtual addresses. */
+- (void)setMMUTranslationControl:(NXTUInt32)control
+                 userRootPointer:(NXTUInt32)userRootPointer
+           supervisorRootPointer:(NXTUInt32)rootPointer;
+/** Reads values through the user MMU translation tree. */
+- (NXTMemoryResult)readByte:(NXTUInt8 *)value
+              atUserAddress:(NXTUInt32)address;
+- (NXTMemoryResult)readWord:(NXTUInt16 *)value
+              atUserAddress:(NXTUInt32)address;
+- (NXTMemoryResult)readLong:(NXTUInt32 *)value
+              atUserAddress:(NXTUInt32)address;
+/** Writes values through the user MMU translation tree. */
+- (NXTMemoryResult)writeByte:(NXTUInt8)value
+               atUserAddress:(NXTUInt32)address;
+- (NXTMemoryResult)writeWord:(NXTUInt16)value
+               atUserAddress:(NXTUInt32)address;
+- (NXTMemoryResult)writeLong:(NXTUInt32)value
+               atUserAddress:(NXTUInt32)address;
 /** Returns the highest pending, unmasked interrupt level. */
 - (unsigned int)pendingInterruptLevel;
 /** Attaches a raw SCSI disk image and reports a failure message if needed. */

@@ -34,6 +34,8 @@
 #define NXT_INTR_DISK (1U << 13)
 #define NXT_INTR_SCSI_DMA (1U << 26)
 #define NXT_INTR_TIMER (1U << 29)
+#define NXT_SCSI_INTERRUPT_DELAY 1000U
+#define NXT_SCSI_BUS_RESET_DELAY 825U
 
 static NXTUInt32
 NXTCanonicalIOAddress (NXTUInt32 address)
@@ -159,6 +161,159 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 
 @implementation NXTMemory
 
+- (BOOL)translateAddress:(NXTUInt32)address
+             rootPointer:(NXTUInt32)rootPointer
+                  result:(NXTUInt32 *)result
+{
+  NXTMemoryRegion *region;
+  NXTUInt8 *bytes;
+  NXTUInt32 descriptor, table;
+  unsigned int indices[3];
+  unsigned int level;
+
+  if ((_mmuTranslationControl & 0x8000U) == 0 || rootPointer == 0)
+    {
+      *result = address;
+      return YES;
+    }
+  indices[0] = (address >> 25) & 0x7fU;
+  indices[1] = (address >> 18) & 0x7fU;
+  indices[2] = (address >> 13) & 0x1fU;
+  table = rootPointer & 0xfffffe00U;
+  for (level = 0; level < 3; level++)
+    {
+      NXTUInt32 entry = table + indices[level] * 4U;
+      region = [self regionContainingAddress:entry length:4];
+      if (region == nil)
+        return NO;
+      bytes = [region mutableBytes] + entry - [region baseAddress];
+      descriptor = ((NXTUInt32)bytes[0] << 24) | ((NXTUInt32)bytes[1] << 16)
+                   | ((NXTUInt32)bytes[2] << 8) | bytes[3];
+      if ((descriptor & 3U) == 0)
+        return NO;
+      if (level == 2)
+        {
+          *result = (descriptor & 0xffffe000U) | (address & 0x1fffU);
+          return YES;
+        }
+      table = descriptor & (level == 0 ? 0xfffffe00U : 0xffffff80U);
+    }
+  return NO;
+}
+
+- (NXTUInt32)translatedAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  if (_mmuBypassTranslation)
+    return address;
+  if (address < 0x10000000U || address >= 0x12000000U)
+    return address;
+  return [self translateAddress:address
+                    rootPointer:_mmuSupervisorRootPointer
+                         result:&translated]
+             ? translated
+             : address;
+}
+
+- (void)setMMUTranslationControl:(NXTUInt32)control
+                 userRootPointer:(NXTUInt32)userRootPointer
+           supervisorRootPointer:(NXTUInt32)rootPointer
+{
+  _mmuTranslationControl = control;
+  _mmuUserRootPointer = userRootPointer;
+  _mmuSupervisorRootPointer = rootPointer;
+}
+
+- (NXTMemoryResult)readByte:(NXTUInt8 *)value
+              atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self readByte:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
+- (NXTMemoryResult)readWord:(NXTUInt16 *)value
+              atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self readWord:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
+- (NXTMemoryResult)readLong:(NXTUInt32 *)value
+              atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self readLong:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
+- (NXTMemoryResult)writeByte:(NXTUInt8)value
+               atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self writeByte:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
+- (NXTMemoryResult)writeWord:(NXTUInt16)value
+               atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self writeWord:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
+- (NXTMemoryResult)writeLong:(NXTUInt32)value
+               atUserAddress:(NXTUInt32)address
+{
+  NXTUInt32 translated;
+  NXTMemoryResult memoryResult;
+  if (![self translateAddress:address
+                  rootPointer:_mmuUserRootPointer
+                       result:&translated])
+    return NXTMemoryResultUnmapped;
+  _mmuBypassTranslation = YES;
+  memoryResult = [self writeLong:value atAddress:translated];
+  _mmuBypassTranslation = NO;
+  return memoryResult;
+}
+
 - (void)resetSCSI
 {
   memset (_espRegisters, 0, sizeof (_espRegisters));
@@ -176,8 +331,13 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   _espRegisters[9] = 2;
   _espFIFOCount = 0;
   _espInterrupt = 0;
+  _espDMAControl = 0x80;
+  _scsiDMAPackSize = 0;
   _scsiPhase = 3;
   _scsiStatus = 0;
+  _scsiSelectionTimeout = NO;
+  _scsiBusResetPending = NO;
+  _scsiBusResetDelay = 0;
   [_scsiData release];
   _scsiData = nil;
   _scsiDataOffset = 0;
@@ -230,6 +390,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt32 lba = 0, blocks = 0, allocation = 0;
   NSMutableData *response = nil;
   NXTUInt8 *bytes;
+  _scsiSelectionTimeout = NO;
   memset (cdb, 0, sizeof (cdb));
   if (count > sizeof (cdb))
     count = sizeof (cdb);
@@ -246,11 +407,38 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   /* The monitor's default `sd(0,0,0)` boot selects SCSI target 0.  Register
      4 is the destination ID when written (and the status register when
      read), so do not confuse it with the controller's own ID. */
-  if (_scsiFile == nil || (_espRegisters[4] & 7) != 0)
+  if (_scsiFile == nil || ((_espRegisters[4] & 7) != 0 && cdb[0] != 0x12))
     {
+      if (_scsiFile != nil && (_espRegisters[4] & 7) != 0)
+        {
+          if (cdb[0] == 0x03)
+            {
+              NXTUInt8 sense[18];
+              allocation = cdb[4] ? cdb[4] : 18;
+              if (allocation > sizeof (sense))
+                allocation = sizeof (sense);
+              memset (sense, 0, sizeof (sense));
+              sense[0] = 0x70;
+              sense[2] = 2;
+              sense[7] = 10;
+              [self setSCSIResponse:
+                        [NSData dataWithBytes:sense length:allocation]
+                              phase:1
+                             status:0];
+            }
+          else
+            [self setSCSIResponse:nil phase:3 status:2];
+          _espRegisters[6] = 4;
+          _espInterrupt = 0x18;
+          _interruptStatus |= NXT_INTR_SCSI;
+          _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
+          return;
+        }
       _espInterrupt = 0x20;
+      _espRegisters[6] = 2;
+      _scsiSelectionTimeout = YES;
       _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
-      _scsiInterruptDelay = 10;
+      _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
       _scsiPhase = 3;
       return;
     }
@@ -260,7 +448,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       _espRegisters[6] = 4;
       _espInterrupt = 0x18;
       _interruptStatus |= NXT_INTR_SCSI;
-      _scsiInterruptDelay = 10;
+      _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
       return;
     }
   switch (cdb[0])
@@ -293,7 +481,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                 ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', '1',
                 '.', '0', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ', ' ',
                 ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',  ' ', ' ' };
-        if ((cdb[1] & 0xe0U) != 0)
+        if ((cdb[1] & 0xe0U) != 0 || (_espRegisters[4] & 7) != 0)
           inquiry[0] = 0x7f;
         allocation = cdb[4];
         if (allocation > sizeof (inquiry))
@@ -322,21 +510,15 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       }
     case 0x1a:
       {
-        NXTUInt8 mode[16];
+        NXTUInt8 mode[12];
         NXTUInt32 sectors = (NXTUInt32)(_scsiSize / 512U);
         memset (mode, 0, sizeof (mode));
-        mode[0] = 15;
+        mode[0] = 11;
         mode[3] = 8;
         mode[5] = sectors >> 16;
         mode[6] = sectors >> 8;
         mode[7] = sectors;
         mode[10] = 2;
-        /* NeXT's disk driver requests the vendor-neutral operating page
-           during discovery.  The usage bit identifies a direct-access
-           device and is part of the response used to accept the drive. */
-        mode[12] = 0;
-        mode[13] = 2;
-        mode[14] = 0x80;
         allocation = cdb[4];
         if (allocation > sizeof (mode))
           allocation = sizeof (mode);
@@ -384,7 +566,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   _espRegisters[6] = 4;
   _espInterrupt = 0x18;
   _interruptStatus |= NXT_INTR_SCSI;
-  _scsiInterruptDelay = 10;
+  _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
 }
 
 - (void)performSCSIDMA
@@ -393,23 +575,38 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt32 limit = _dmaRegisters[5];
   NXTUInt32 requested
       = (NXTUInt32)_espRegisters[0] | ((NXTUInt32)_espRegisters[1] << 8);
-  NXTUInt32 room = limit > address ? limit - address : 0;
   NXTUInt32 available
       = _scsiData == nil ? 0
                          : (NXTUInt32)([_scsiData length] - _scsiDataOffset);
-  NXTUInt32 amount = requested == 0 ? 65536U : requested;
-  NXTUInt32 i;
-  if (amount > room)
-    amount = room;
+  NXTUInt32 remaining = requested == 0 ? 65536U : requested;
+  NXTUInt32 consumed = 0;
+  unsigned int i;
   if (_scsiPhase == 1)
     {
-      if (amount > available)
-        amount = available;
-      for (i = 0; i < amount; i++)
-        [self writeByte:((const NXTUInt8 *)
-                             [_scsiData bytes])[_scsiDataOffset + i]
-              atAddress:address + i];
-      _scsiDataOffset += amount;
+      while (remaining != 0 && available != 0)
+        {
+          while (_scsiDMAPackSize < sizeof (_scsiDMAPack) && remaining != 0
+                 && available != 0)
+            {
+              _scsiDMAPack[_scsiDMAPackSize++]
+                  = ((const NXTUInt8 *)[_scsiData bytes])[_scsiDataOffset++];
+              remaining--;
+              available--;
+              consumed++;
+            }
+          if (_scsiDMAPackSize < sizeof (_scsiDMAPack))
+            break;
+          while (_scsiDMAPackSize >= 4 && address < limit)
+            {
+              for (i = 0; i < 4; i++)
+                [self writeByte:_scsiDMAPack[i] atAddress:address + i];
+              memmove (_scsiDMAPack, _scsiDMAPack + 4, _scsiDMAPackSize - 4);
+              _scsiDMAPackSize -= 4;
+              address += 4;
+            }
+          if (_scsiDMAPackSize != 0)
+            break;
+        }
       if (_scsiDataOffset >= [_scsiData length])
         _scsiPhase = 3;
     }
@@ -417,21 +614,20 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
     {
       /* Images are opened read-only; consume guest writes so boot-time
        * metadata does not stall. */
-      amount = amount > room ? room : amount;
+      consumed = remaining;
+      remaining = 0;
       _scsiPhase = 3;
     }
-  else
-    {
-      amount = 0;
-    }
-  _dmaRegisters[4] = address + amount;
+  _dmaRegisters[4] = address;
+  (void)consumed;
 #ifdef NXT_TRACE_SCSI
   fprintf (stderr,
-           "SCSI DMA phase=%u address=%08x limit=%08x requested=%u amount=%u "
-           "available=%u\n",
-           _scsiPhase, address, limit, requested, amount, available);
+           "SCSI DMA phase=%u address=%08x limit=%08x requested=%u "
+           "consumed=%u pack=%u available=%u\n",
+           _scsiPhase, address, limit, requested, consumed, _scsiDMAPackSize,
+           available);
 #endif
-  requested = (requested == 0 ? 65536U : requested) - amount;
+  requested = remaining;
   _espRegisters[0] = (NXTUInt8)requested;
   _espRegisters[1] = (NXTUInt8)(requested >> 8);
   /* The initiator's transfer count, rather than the size of the target's
@@ -440,9 +636,13 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
      and causes the ROM to retry every READ indefinitely. */
   if (requested == 0 && (_scsiPhase == 0 || _scsiPhase == 1))
     _scsiPhase = 3;
-  _dmaState = 0x08;
+  if (_dmaRegisters[4] == limit)
+    {
+      _dmaState = 0x08;
+      _interruptStatus |= NXT_INTR_SCSI_DMA;
+    }
   _espInterrupt = 0x08;
-  _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK | NXT_INTR_SCSI_DMA;
+  _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
   _scsiInterruptDelay = 0; /* DMA completion is sampled immediately. */
 }
 
@@ -534,6 +734,21 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
     {
       _scsiInterruptDelay--;
       pending &= ~(NXT_INTR_SCSI | NXT_INTR_DISK);
+    }
+  if (_scsiBusResetPending && _scsiBusResetDelay != 0
+      && --_scsiBusResetDelay == 0)
+    {
+      _scsiBusResetPending = NO;
+      _espInterrupt |= 0x80U;
+      _espRegisters[6] = 0;
+      _scsiPhase = 3;
+      /* Config 1 bit 6 suppresses the external interrupt while preserving
+         the latched SCSI-reset condition in the interrupt register. */
+      if ((_espRegisters[8] & 0x40U) == 0)
+        {
+          _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+          pending = _interruptStatus & _interruptMask;
+        }
     }
   if (pending & 0xfc7c0000U)
     return 6;
@@ -712,13 +927,14 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt32 canonical;
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, NO, 1);
   canonical = address & 0x7fffffffU;
   if ((canonical & 0xfff00000U) == 0x02100000U)
     canonical -= 0x00100000U;
   if (canonical >= 0x02014100U && canonical <= 0x02014108U)
     {
-      *value = canonical == 0x02014104U ? 0x80U : 0;
+      *value = canonical == 0x02014104U ? _espDMAControl : 0;
       return NXTMemoryResultOK;
     }
   if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U)
@@ -736,7 +952,8 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
         {
           *value
               = (NXTUInt8)(0x80U | (_scsiPhase & 7U)
-                           | ((_espRegisters[0] == 0 && _espRegisters[1] == 0)
+                           | ((!_scsiSelectionTimeout && _espRegisters[0] == 0
+                               && _espRegisters[1] == 0)
                                   ? 0x10U
                                   : 0));
         }
@@ -869,6 +1086,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt8 *bytes;
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, NO, 2);
   if ((address & 0x7ffffffeU) == 0x02008000U)
     {
@@ -900,6 +1118,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt8 *bytes;
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, NO, 4);
   {
     NXTUInt32 canonical = NXTCanonicalIOAddress (address);
@@ -991,6 +1210,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 - (NXTMemoryResult)writeByte:(NXTUInt8)value atAddress:(NXTUInt32)address
 {
   NXTMemoryRegion *region;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, YES, 1);
   NXTUInt32 canonical = NXTCanonicalIOAddress (address);
   if (canonical == 0x02010000U)
@@ -998,7 +1218,33 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (canonical == 0x02018004U)
     return NXTMemoryResultOK;
   if (canonical >= 0x02014100U && canonical <= 0x02014108U)
-    return NXTMemoryResultOK;
+    {
+      if (canonical == 0x02014104U)
+        {
+          unsigned int i;
+          _espDMAControl = value;
+          if ((value & 0x04U) != 0 && _scsiDMAPackSize != 0
+              && _dmaRegisters[4] < _dmaRegisters[5])
+            {
+              unsigned int count = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
+              for (i = 0; i < count; i++)
+                [self writeByte:_scsiDMAPack[i]
+                      atAddress:_dmaRegisters[4] + i];
+              for (; i < 4; i++)
+                [self writeByte:0 atAddress:_dmaRegisters[4] + i];
+              memmove (_scsiDMAPack, _scsiDMAPack + count,
+                       _scsiDMAPackSize - count);
+              _scsiDMAPackSize -= count;
+              _dmaRegisters[4] += 4;
+              if (_dmaRegisters[4] == _dmaRegisters[5])
+                {
+                  _dmaState = 0x08;
+                  _interruptStatus |= NXT_INTR_SCSI_DMA;
+                }
+            }
+        }
+      return NXTMemoryResultOK;
+    }
   if (canonical >= NXT_ESP_BASE && canonical < NXT_ESP_BASE + 16U)
     {
       unsigned int reg = canonical - NXT_ESP_BASE;
@@ -1014,9 +1260,21 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
         {
           NXTUInt8 command = value & 0x7fU;
           if (command == 1)
-            _espFIFOCount = 0;
-          else if (command == 2 || command == 3)
+            {
+              _espFIFOCount = 0;
+              _scsiSelectionTimeout = NO;
+            }
+          else if (command == 2)
             [self resetSCSI];
+          else if (command == 3)
+            {
+              /* RESET SCSI BUS drives RST for 25 microseconds; unlike RESET
+                 CHIP it does not discard the ESP configuration registers. */
+              _scsiBusResetPending = YES;
+              _scsiBusResetDelay = NXT_SCSI_BUS_RESET_DELAY;
+              _scsiSelectionTimeout = NO;
+              _scsiPhase = 3;
+            }
           else if (command == 0x41 || command == 0x42)
             [self executeSCSICommandWithIdentify:command == 0x42];
           else if (command == 0x10)
@@ -1030,25 +1288,45 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                   _espFIFOCount = 1;
                   _espInterrupt = 8;
                   _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
-                  _scsiInterruptDelay = 10;
+                  _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
                 }
             }
           else if (command == 0x11)
             {
+              /* A short device-to-memory transfer may finish with fewer than
+                 sixteen bytes in the DMA pack register.  NCR53C90 completion
+                 does not expose status until those bytes have been drained;
+                 otherwise the driver parses stale response storage. */
+              while (_scsiDMAPackSize != 0
+                     && _dmaRegisters[4] < _dmaRegisters[5])
+                {
+                  unsigned int byte;
+                  unsigned int count
+                      = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
+                  for (byte = 0; byte < count; byte++)
+                    [self writeByte:_scsiDMAPack[byte]
+                          atAddress:_dmaRegisters[4] + byte];
+                  for (; byte < 4; byte++)
+                    [self writeByte:0 atAddress:_dmaRegisters[4] + byte];
+                  memmove (_scsiDMAPack, _scsiDMAPack + count,
+                           _scsiDMAPackSize - count);
+                  _scsiDMAPackSize -= count;
+                  _dmaRegisters[4] += 4;
+                }
               _espFIFO[0] = _scsiStatus;
               _espFIFO[1] = 0;
               _espFIFOCount = 2;
               _scsiPhase = 7;
               _espInterrupt = 8;
               _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
-              _scsiInterruptDelay = 10;
+              _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           else if (command == 0x12)
             {
               _scsiPhase = 3;
               _espInterrupt = 0x10;
               _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
-              _scsiInterruptDelay = 10;
+              _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           else if (command == 0x18)
             { /* Transfer pad */
@@ -1069,7 +1347,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                 _scsiPhase = 3;
               _espInterrupt = 0x08;
               _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
-              _scsiInterruptDelay = 10;
+              _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           _espRegisters[3] = value;
         }
@@ -1188,6 +1466,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 - (NXTMemoryResult)writeWord:(NXTUInt16)value atAddress:(NXTUInt32)address
 {
   NXTMemoryRegion *region;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, YES, 2);
   NXTUInt8 *bytes;
   region = [self regionContainingAddress:address length:2];
@@ -1204,6 +1483,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 - (NXTMemoryResult)writeLong:(NXTUInt32)value atAddress:(NXTUInt32)address
 {
   NXTMemoryRegion *region;
+  address = [self translatedAddress:address];
   NXTTraceMMIO (address, YES, 4);
   NXTUInt8 *bytes;
   {
@@ -1215,6 +1495,33 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
     int dmaChannel = NXTDMAChannelForAddress (canonical);
     if (canonical == NXT_DMA_CSR)
       {
+        if ((value & (0x00400000U | 0x00100000U)) != 0
+            && _scsiDMAPackSize != 0)
+          {
+            unsigned int word, byte;
+            for (word = 0; word < 4 && _dmaRegisters[4] < _dmaRegisters[5];
+                 word++)
+              {
+                unsigned int count
+                    = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
+                for (byte = 0; byte < count; byte++)
+                  [self writeByte:_scsiDMAPack[byte]
+                        atAddress:_dmaRegisters[4] + byte];
+                for (; byte < 4; byte++)
+                  [self writeByte:0 atAddress:_dmaRegisters[4] + byte];
+                memmove (_scsiDMAPack, _scsiDMAPack + count,
+                         _scsiDMAPackSize - count);
+                _scsiDMAPackSize -= count;
+                _dmaRegisters[4] += 4;
+              }
+            if (_dmaRegisters[4] == _dmaRegisters[5])
+              {
+                _dmaState = 0x08;
+                _interruptStatus |= NXT_INTR_SCSI_DMA;
+              }
+          }
+        if (value & 0x00800000U)
+          _scsiDMAPackSize = 0;
         if (value & 0x00100000U)
           {
             _dmaState &= ~(0x0bU);
@@ -1385,6 +1692,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       {
         _dmaRegisters[8] = value;
         _dmaRegisters[4] = value;
+        _scsiDMAPackSize = 0;
         return NXTMemoryResultOK;
       }
   }

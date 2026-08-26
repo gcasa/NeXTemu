@@ -51,6 +51,8 @@ typedef enum
   NXTUInt32 _masterStackPointer;
   NXTUInt32 _interruptStackPointer;
   NXTUInt32 _translationControl;
+  NXTUInt32 _sourceFunctionCode;
+  NXTUInt32 _destinationFunctionCode;
   NXTUInt32 _userRootPointer;
   NXTUInt32 _supervisorRootPointer;
   NXTUInt8 _fpRegisters[8][12];
