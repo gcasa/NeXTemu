@@ -45,6 +45,10 @@ typedef enum
   NXTProcessorResult _lastResult;
   NXTUInt32 _lastOpcodeAddress;
   NXTUInt16 _lastOpcode;
+  NXTUInt32 _lastFaultAddress;
+  unsigned int _lastFaultSize;
+  BOOL _lastFaultWriting;
+  BOOL _lastFaultValid;
   NXTUInt64 _instructionsExecuted;
   NXTUInt32 _vectorBaseRegister;
   NXTUInt32 _userStackPointer;

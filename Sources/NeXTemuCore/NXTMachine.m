@@ -103,7 +103,7 @@ NXTAddRegisterBank (NXTMemory *memory, NXTUInt32 base, NXTUInt32 length)
                                model == NXTMachineModelNeXTcubeTurbo
                                    ? 0x0c000000U
                                    : 0x0b000000U,
-                               0x001cb100U)
+                               0x01000000U)
           || /* display */
           !NXTAddRegisterBank (_memory, 0x820c0000U, 0x00000040U))
         {

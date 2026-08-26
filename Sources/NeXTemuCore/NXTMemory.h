@@ -101,6 +101,7 @@
   NXTUInt32 _interruptMask;
   unsigned int _scsiInterruptDelay;
   BOOL _verboseBoot;
+  BOOL _turboVideo;
   NXTUInt16 _hardclockStaging;
   NXTUInt16 _hardclockReload;
   NXTUInt8 _hardclockCSR;

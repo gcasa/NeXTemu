@@ -31,7 +31,6 @@
 #define NXT_ESP_BASE 0x02014000U
 #define NXT_DMA_CSR 0x02000010U
 #define NXT_INTR_SCSI (1U << 12)
-#define NXT_INTR_DISK (1U << 13)
 #define NXT_INTR_SCSI_DMA (1U << 26)
 #define NXT_INTR_TIMER (1U << 29)
 #define NXT_SCSI_INTERRUPT_DELAY 1000U
@@ -43,6 +42,15 @@ NXTCanonicalIOAddress (NXTUInt32 address)
   address &= 0x7fffffffU;
   if ((address & 0xfff00000U) == 0x02100000U)
     address -= 0x00100000U;
+  return address;
+}
+
+static NXTUInt32
+NXTCanonicalVideoAddress (NXTUInt32 address, BOOL turbo)
+{
+  NXTUInt32 videoBase = turbo ? 0x0c000000U : 0x0b000000U;
+  if (address >= videoBase && address < videoBase + 0x01000000U)
+    return (address & 0xff000000U) | (address & 0x0003ffffU);
   return address;
 }
 
@@ -437,7 +445,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       _espInterrupt = 0x20;
       _espRegisters[6] = 2;
       _scsiSelectionTimeout = YES;
-      _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+      _interruptStatus |= NXT_INTR_SCSI;
       _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
       _scsiPhase = 3;
       return;
@@ -599,10 +607,11 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
           while (_scsiDMAPackSize >= 4 && address < limit)
             {
               for (i = 0; i < 4; i++)
-                [self writeByte:_scsiDMAPack[i] atAddress:address + i];
+                if (address + i < limit)
+                  [self writeByte:_scsiDMAPack[i] atAddress:address + i];
               memmove (_scsiDMAPack, _scsiDMAPack + 4, _scsiDMAPackSize - 4);
               _scsiDMAPackSize -= 4;
-              address += 4;
+              address = limit - address < 4U ? limit : address + 4U;
             }
           if (_scsiDMAPackSize != 0)
             break;
@@ -642,7 +651,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       _interruptStatus |= NXT_INTR_SCSI_DMA;
     }
   _espInterrupt = 0x08;
-  _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+  _interruptStatus |= NXT_INTR_SCSI;
   _scsiInterruptDelay = 0; /* DMA completion is sampled immediately. */
 }
 
@@ -651,6 +660,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   NXTUInt32 sum;
   NXTUInt16 checksum;
   unsigned int index;
+  _turboVideo = turbo;
   memset (_rtcRegisters, 0, sizeof (_rtcRegisters));
   /* Keep the console on the built-in display.  Bit 27 (0x08 here)
      selects the alternate serial console and leaves the framebuffer
@@ -730,10 +740,12 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       _interruptStatus |= NXT_INTR_TIMER;
       pending = _interruptStatus & _interruptMask;
     }
+  if ((_espDMAControl & 0x20U) == 0)
+    pending &= ~NXT_INTR_SCSI;
   if (_scsiInterruptDelay != 0)
     {
       _scsiInterruptDelay--;
-      pending &= ~(NXT_INTR_SCSI | NXT_INTR_DISK);
+      pending &= ~NXT_INTR_SCSI;
     }
   if (_scsiBusResetPending && _scsiBusResetDelay != 0
       && --_scsiBusResetDelay == 0)
@@ -746,7 +758,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
          the latched SCSI-reset condition in the interrupt register. */
       if ((_espRegisters[8] & 0x40U) == 0)
         {
-          _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+          _interruptStatus |= NXT_INTR_SCSI;
           pending = _interruptStatus & _interruptMask;
         }
     }
@@ -928,6 +940,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, NO, 1);
   canonical = address & 0x7fffffffU;
   if ((canonical & 0xfff00000U) == 0x02100000U)
@@ -951,7 +964,8 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
       else if (reg == 4)
         {
           *value
-              = (NXTUInt8)(0x80U | (_scsiPhase & 7U)
+              = (NXTUInt8)((_espInterrupt != 0 ? 0x80U : 0)
+                           | (_scsiPhase & 7U)
                            | ((!_scsiSelectionTimeout && _espRegisters[0] == 0
                                && _espRegisters[1] == 0)
                                   ? 0x10U
@@ -961,7 +975,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
         {
           *value = _espInterrupt;
           _espInterrupt = 0;
-          _interruptStatus &= ~(NXT_INTR_SCSI | NXT_INTR_DISK);
+          _interruptStatus &= ~NXT_INTR_SCSI;
           _scsiInterruptDelay = 0;
         }
       else if (reg == 7)
@@ -1087,6 +1101,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, NO, 2);
   if ((address & 0x7ffffffeU) == 0x02008000U)
     {
@@ -1119,6 +1134,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
   if (value == NULL)
     return NXTMemoryResultOutOfRange;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, NO, 4);
   {
     NXTUInt32 canonical = NXTCanonicalIOAddress (address);
@@ -1211,6 +1227,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 {
   NXTMemoryRegion *region;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, YES, 1);
   NXTUInt32 canonical = NXTCanonicalIOAddress (address);
   if (canonical == 0x02010000U)
@@ -1223,19 +1240,25 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
         {
           unsigned int i;
           _espDMAControl = value;
+          if ((value & 0x20U) == 0)
+            _interruptStatus &= ~NXT_INTR_SCSI;
+          else if (_espInterrupt != 0)
+            _interruptStatus |= NXT_INTR_SCSI;
           if ((value & 0x04U) != 0 && _scsiDMAPackSize != 0
               && _dmaRegisters[4] < _dmaRegisters[5])
             {
               unsigned int count = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
               for (i = 0; i < count; i++)
-                [self writeByte:_scsiDMAPack[i]
-                      atAddress:_dmaRegisters[4] + i];
-              for (; i < 4; i++)
-                [self writeByte:0 atAddress:_dmaRegisters[4] + i];
+                if (_dmaRegisters[4] + i < _dmaRegisters[5])
+                  [self writeByte:_scsiDMAPack[i]
+                        atAddress:_dmaRegisters[4] + i];
               memmove (_scsiDMAPack, _scsiDMAPack + count,
                        _scsiDMAPackSize - count);
               _scsiDMAPackSize -= count;
-              _dmaRegisters[4] += 4;
+              _dmaRegisters[4]
+                  = _dmaRegisters[5] - _dmaRegisters[4] < 4U
+                        ? _dmaRegisters[5]
+                        : _dmaRegisters[4] + 4U;
               if (_dmaRegisters[4] == _dmaRegisters[5])
                 {
                   _dmaState = 0x08;
@@ -1287,7 +1310,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                       const NXTUInt8 *)[_scsiData bytes])[_scsiDataOffset++];
                   _espFIFOCount = 1;
                   _espInterrupt = 8;
-                  _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+                  _interruptStatus |= NXT_INTR_SCSI;
                   _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
                 }
             }
@@ -1304,28 +1327,30 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                   unsigned int count
                       = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
                   for (byte = 0; byte < count; byte++)
-                    [self writeByte:_scsiDMAPack[byte]
-                          atAddress:_dmaRegisters[4] + byte];
-                  for (; byte < 4; byte++)
-                    [self writeByte:0 atAddress:_dmaRegisters[4] + byte];
+                    if (_dmaRegisters[4] + byte < _dmaRegisters[5])
+                      [self writeByte:_scsiDMAPack[byte]
+                            atAddress:_dmaRegisters[4] + byte];
                   memmove (_scsiDMAPack, _scsiDMAPack + count,
                            _scsiDMAPackSize - count);
                   _scsiDMAPackSize -= count;
-                  _dmaRegisters[4] += 4;
+                  _dmaRegisters[4]
+                      = _dmaRegisters[5] - _dmaRegisters[4] < 4U
+                            ? _dmaRegisters[5]
+                            : _dmaRegisters[4] + 4U;
                 }
               _espFIFO[0] = _scsiStatus;
               _espFIFO[1] = 0;
               _espFIFOCount = 2;
               _scsiPhase = 7;
               _espInterrupt = 8;
-              _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+              _interruptStatus |= NXT_INTR_SCSI;
               _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           else if (command == 0x12)
             {
               _scsiPhase = 3;
               _espInterrupt = 0x10;
-              _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+              _interruptStatus |= NXT_INTR_SCSI;
               _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           else if (command == 0x18)
@@ -1346,7 +1371,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
               if (_scsiDataOffset >= [_scsiData length])
                 _scsiPhase = 3;
               _espInterrupt = 0x08;
-              _interruptStatus |= NXT_INTR_SCSI | NXT_INTR_DISK;
+              _interruptStatus |= NXT_INTR_SCSI;
               _scsiInterruptDelay = NXT_SCSI_INTERRUPT_DELAY;
             }
           _espRegisters[3] = value;
@@ -1467,6 +1492,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 {
   NXTMemoryRegion *region;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, YES, 2);
   NXTUInt8 *bytes;
   region = [self regionContainingAddress:address length:2];
@@ -1484,6 +1510,7 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
 {
   NXTMemoryRegion *region;
   address = [self translatedAddress:address];
+  address = NXTCanonicalVideoAddress (address, _turboVideo);
   NXTTraceMMIO (address, YES, 4);
   NXTUInt8 *bytes;
   {
@@ -1505,14 +1532,16 @@ NXTTraceMMIO (NXTUInt32 address, BOOL writing, NXTUInt32 size)
                 unsigned int count
                     = _scsiDMAPackSize < 4 ? _scsiDMAPackSize : 4;
                 for (byte = 0; byte < count; byte++)
-                  [self writeByte:_scsiDMAPack[byte]
-                        atAddress:_dmaRegisters[4] + byte];
-                for (; byte < 4; byte++)
-                  [self writeByte:0 atAddress:_dmaRegisters[4] + byte];
+                  if (_dmaRegisters[4] + byte < _dmaRegisters[5])
+                    [self writeByte:_scsiDMAPack[byte]
+                          atAddress:_dmaRegisters[4] + byte];
                 memmove (_scsiDMAPack, _scsiDMAPack + count,
                          _scsiDMAPackSize - count);
                 _scsiDMAPackSize -= count;
-                _dmaRegisters[4] += 4;
+                _dmaRegisters[4]
+                    = _dmaRegisters[5] - _dmaRegisters[4] < 4U
+                          ? _dmaRegisters[5]
+                          : _dmaRegisters[4] + 4U;
               }
             if (_dmaRegisters[4] == _dmaRegisters[5])
               {

@@ -456,7 +456,15 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                          size:size
                       writing:NO])
     return NO;
-  return [self readSized:value address:address size:size];
+  if (![self readSized:value address:address size:size])
+    {
+      _lastFaultAddress = address;
+      _lastFaultSize = size;
+      _lastFaultWriting = NO;
+      _lastFaultValid = YES;
+      return NO;
+    }
+  return YES;
 }
 
 - (BOOL)writeEA:(NXTUInt32)value
@@ -484,7 +492,15 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                          size:size
                       writing:YES])
     return NO;
-  return [self writeSized:value address:address size:size];
+  if (![self writeSized:value address:address size:size])
+    {
+      _lastFaultAddress = address;
+      _lastFaultSize = size;
+      _lastFaultWriting = YES;
+      _lastFaultValid = YES;
+      return NO;
+    }
+  return YES;
 }
 
 - (NXTProcessorResult)fail:(NXTProcessorResult)result
@@ -519,11 +535,39 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
   _statusRegister = value;
 }
 
+- (NXTProcessorResult)raiseFormatZeroException:(unsigned int)vector
+                              programCounter:(NXTUInt32)returnProgramCounter
+{
+  NXTUInt16 savedStatus = _statusRegister;
+  NXTUInt32 handler;
+
+  if ((_statusRegister & 0x2000U) == 0)
+    {
+      _userStackPointer = _addressRegisters[7];
+      _addressRegisters[7] = _interruptStackPointer;
+    }
+  _statusRegister |= 0x2000U;
+  if (![self pushWord:(NXTUInt16)(vector * 4U)]
+      || ![self pushLong:returnProgramCounter] || ![self pushWord:savedStatus]
+      || [_memory readLong:&handler
+                 atAddress:_vectorBaseRegister + vector * 4U]
+             != NXTMemoryResultOK)
+    return [self fail:NXTProcessorResultBusError];
+  if ((_statusRegister & 0x1000U) != 0)
+    _masterStackPointer = _addressRegisters[7];
+  else
+    _interruptStackPointer = _addressRegisters[7];
+  _programCounter = handler;
+  return NXTProcessorResultOK;
+}
+
 - (NXTProcessorResult)raiseAccessErrorAtAddress:(NXTUInt32)faultAddress
                                   programCounter:(NXTUInt32)faultProgramCounter
                                             size:(unsigned int)faultSize
                                          writing:(BOOL)writing
                                     functionCode:(NXTUInt32)functionCode
+                                        atcFault:(BOOL)atcFault
+                                   writebackData:(NXTUInt32)writebackData
 {
   NXTUInt16 savedStatus = _statusRegister;
   NXTUInt16 specialStatus;
@@ -543,14 +587,13 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
   /* 68040 format-7 access-error frame.  The kernel's copyin/copyout fault
      recovery examines the SSW and fault-address fields before discarding
      the complete 60-byte frame. */
-  /* MOVES reaches this path after an MMU translation failure, so identify
-     the fault as an ATC fault rather than an external physical-bus error. */
-  specialStatus = (NXTUInt16)(0x0400U | (functionCode & 7U));
+  specialStatus = (NXTUInt16)((atcFault ? 0x0400U : 0)
+                              | (functionCode & 7U));
   if (!writing)
     specialStatus |= 0x0100U;
-  /* SSW SIZE is 00=byte, 01=word, 10=long, and 11=line. */
-  specialStatus |= faultSize == 2 ? 0x0020U
-                                  : (faultSize == 4 ? 0x0040U : 0);
+  /* SSW SIZE is 01=byte, 10=word, 00=long, and 11=cache line. */
+  specialStatus |= faultSize == 1 ? 0x0020U
+                                  : (faultSize == 2 ? 0x0040U : 0);
   for (offset = 0; offset < 60U; offset += 2U)
     if ([_memory writeWord:0 atAddress:frameAddress + offset]
         != NXTMemoryResultOK)
@@ -565,7 +608,16 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
              != NXTMemoryResultOK
       || [_memory writeWord:specialStatus atAddress:frameAddress + 12U]
              != NXTMemoryResultOK
+      || [_memory writeWord:(writing ? 0x0080U | (specialStatus & 0x007fU)
+                                     : 0)
+                    atAddress:frameAddress + 14U]
+             != NXTMemoryResultOK
       || [_memory writeLong:faultAddress atAddress:frameAddress + 20U]
+             != NXTMemoryResultOK
+      || [_memory writeLong:faultAddress atAddress:frameAddress + 24U]
+             != NXTMemoryResultOK
+      || [_memory writeLong:(writing ? writebackData : 0)
+                    atAddress:frameAddress + 28U]
              != NXTMemoryResultOK
       || [_memory readLong:&handler atAddress:_vectorBaseRegister + 8U]
              != NXTMemoryResultOK)
@@ -773,6 +825,7 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       || _programCounter == 0x010024e8U)
     _dataRegisters[3] = 0;
   _lastOpcodeAddress = _programCounter;
+  _lastFaultValid = NO;
   if (![self fetchWord:&opcode])
     return [self fail:NXTProcessorResultBusError];
   _lastOpcode = opcode;
@@ -1353,6 +1406,11 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       _programCounter = value;
       return NXTProcessorResultOK;
     }
+  if ((opcode & 0xfff0U) == 0x4e40U)
+    { /* TRAP #n */
+      return [self raiseFormatZeroException:32U + (opcode & 15U)
+                                    programCounter:_programCounter];
+    }
   if (opcode == 0x4e73)
     { /* RTE */
       NXTUInt16 restoredStatus, frame;
@@ -1878,7 +1936,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                                     programCounter:_lastOpcodeAddress
                                               size:size
                                            writing:YES
-                                      functionCode:_destinationFunctionCode];
+                                      functionCode:_destinationFunctionCode
+                                          atcFault:YES
+                                     writebackData:value];
         }
       else
         {
@@ -1909,7 +1969,9 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
                                     programCounter:_lastOpcodeAddress
                                               size:size
                                            writing:NO
-                                      functionCode:_sourceFunctionCode];
+                                      functionCode:_sourceFunctionCode
+                                          atcFault:YES
+                                     writebackData:0];
           if (size == 1)
             value &= 0xffU;
           else if (size == 2)
@@ -2049,12 +2111,29 @@ NXTIsFirmwareFPUPostAddress (NXTUInt32 address)
       if (![self readEA:&value
                    mode:sourceMode
                register:sourceRegister
-                   size:size]
-          || ![self writeEA:value
-                       mode:destinationMode
-                   register:destinationRegister
-                       size:size])
-        return [self fail:NXTProcessorResultBusError];
+                   size:size])
+        return _lastFaultValid
+                   ? [self raiseAccessErrorAtAddress:_lastFaultAddress
+                                      programCounter:_lastOpcodeAddress
+                                                size:_lastFaultSize
+                                             writing:NO
+                                        functionCode:5U
+                                            atcFault:NO
+                                       writebackData:0]
+                   : [self fail:NXTProcessorResultBusError];
+      if (![self writeEA:value
+                    mode:destinationMode
+                register:destinationRegister
+                    size:size])
+        return _lastFaultValid
+                   ? [self raiseAccessErrorAtAddress:_lastFaultAddress
+                                      programCounter:_lastOpcodeAddress
+                                                size:_lastFaultSize
+                                             writing:YES
+                                        functionCode:5U
+                                            atcFault:NO
+                                       writebackData:value]
+                   : [self fail:NXTProcessorResultBusError];
       if (destinationMode != 1)
         [self setNZForValue:value size:size];
       return NXTProcessorResultOK;

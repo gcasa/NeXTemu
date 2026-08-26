@@ -223,6 +223,13 @@ NXTTestMachineROMAliases (void)
   NXTAssert ([[machine memory] writeLong:0x12345678U atAddress:0x11846008U]
                  == NXTMemoryResultOK,
              "maps the kernel virtual-allocation window");
+  NXTAssert ([[machine memory] writeLong:0x89abcdefU
+                               atAddress:0x0bfffffcU]
+                     == NXTMemoryResultOK
+                 && [[machine memory] readLong:&low atAddress:0x0b03fffcU]
+                        == NXTMemoryResultOK
+                 && low == 0x89abcdefU,
+             "mirrors 256 KiB of VRAM through its sixteen-megabyte aperture");
   NXTAssert ([machine reset] &&
                  [[machine processor] programCounter] == 0x01000008,
              "resets into the high ROM alias");
@@ -280,7 +287,7 @@ NXTTestMovesAccessErrorFrame (void)
   [memory readLong:&faultAddress atAddress:0x20c4 + 20];
   NXTAssert ([processor programCounter] == 0x180 && format == 0x7008U,
              "builds a 68040 format-7 access-error frame");
-  NXTAssert ((specialStatus & 0x0767U) == 0x0441U
+  NXTAssert ((specialStatus & 0x0707U) == 0x0401U
                  && faultAddress == 0x3000U,
              "records the ATC fault direction, space, and address");
   [processor release];
@@ -583,11 +590,12 @@ NXTTestSCSISelectionFailureInterrupt (void)
   NXTMemory *memory = [[NXTMemory alloc] init];
   NXTUInt32 interruptStatus = 0;
   [memory resetNeXTDevicesForTurbo:YES];
+  [memory writeByte:0x20 atAddress:0x02014104U];
   [memory writeByte:1 atAddress:0x02014004U];
   [memory writeByte:0 atAddress:0x02014002U];
   [memory writeByte:0x41 atAddress:0x02014003U];
   [memory readLong:&interruptStatus atAddress:0x02007000U];
-  NXTAssert (interruptStatus == ((1U << 12) | (1U << 13)),
+  NXTAssert (interruptStatus == (1U << 12),
              "SCSI selection failure raises the controller interrupt");
   [memory release];
 }
@@ -707,6 +715,43 @@ NXTTestImmediateBitMemoryDisplacement (void)
   [memory release];
 }
 
+static void
+NXTTestTrapException (void)
+{
+  NXTMemory *memory = [[NXTMemory alloc] init];
+  NXTMemoryRegion *image = [[NXTMemoryRegion alloc] initWithBaseAddress:0
+                                                                length:0x300
+                                                              readOnly:NO];
+  NXTMemoryRegion *stack = [[NXTMemoryRegion alloc] initWithBaseAddress:0x1000
+                                                                length:0x1000
+                                                              readOnly:NO];
+  NXTMC68040 *processor;
+  NXTUInt8 vectors[8] = { 0, 0, 0x20, 0, 0, 0, 1, 0 };
+  NXTUInt8 trapVector[4] = { 0, 0, 2, 0 };
+  NXTUInt8 trap[2] = { 0x4e, 0x4d };
+  NXTUInt16 frame = 0;
+
+  [memory addRegion:image];
+  [memory addRegion:stack];
+  [memory loadData:[NSData dataWithBytes:vectors length:sizeof (vectors)]
+         atAddress:0];
+  [memory loadData:[NSData dataWithBytes:trapVector length:4]
+         atAddress:(32U + 13U) * 4U];
+  [memory loadData:[NSData dataWithBytes:trap length:2] atAddress:0x100];
+  processor = [[NXTMC68040 alloc] initWithMemory:memory];
+  NXTAssert ([processor reset], "resets TRAP exception test");
+  NXTAssert ([processor step] == NXTProcessorResultOK
+                 && [processor programCounter] == 0x200U,
+             "vectors TRAP #13 through vector 45");
+  [memory readWord:&frame atAddress:0x1ffe];
+  NXTAssert (frame == (32U + 13U) * 4U,
+             "records the TRAP vector in a format-zero frame");
+  [processor release];
+  [stack release];
+  [image release];
+  [memory release];
+}
+
 int
 main (void)
 {
@@ -730,6 +775,7 @@ main (void)
   NXTTestSCSINonzeroLUN ();
   NXTTestCompareMemoryPostincrement ();
   NXTTestImmediateBitMemoryDisplacement ();
+  NXTTestTrapException ();
   if (failures == 0)
     printf ("All core tests passed.\n");
   [pool drain];
