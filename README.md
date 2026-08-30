@@ -22,6 +22,13 @@ enter its reset path, and exercise initial hardware probes. It does **not** yet
 implement the complete CPU, MMU, NeXT chipset, storage, or display pipeline
 required to boot NeXTSTEP.
 
+## Important NOTE
+
+The emulator is currently not fully functional.  I am muddling through
+implementing the complex 680x0 instruction set, and there are many pitfalls.
+The emulator is mainly a learning/teaching tool for me, and hopefully useful to
+others. :)
+
 ## Build on macOS
 
 Install the Xcode command-line tools, then run:
